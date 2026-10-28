@@ -25,7 +25,7 @@ def job_directory(root, key, action_id, *, create=False):
         if directory.is_symlink():
             raise EngineError("Execution artifacts must not be symlinks.")
         if create and not directory.exists():
-            directory.mkdir(mode=0o700)
+            directory.mkdir(mode=0o700, exist_ok=True)
             sync_directory(directory.parent)
     return directory
 
@@ -58,6 +58,23 @@ def read_output(root, key, action_id, after, *, final=False):
     return {"action_id": action_id, "after": after, "next": after + len(data), "output": text}
 
 
+def action_configuration(engine, key, action):
+    root = Path(engine.catalog["tasks_root"])
+    captured = copy.deepcopy(action)
+    captured.update({"task_set": key[0], "task": key[1]})
+    return {
+        "schema_version": 1,
+        "action": captured,
+        "execution": copy.deepcopy(action["execution"]),
+        "task_path": str(root.joinpath(*key)),
+        "job_path": str(job_directory(root, key, action["action_id"])),
+        "dependency_results": {
+            name: copy.deepcopy(engine._states[key]["actions"][action_id]["result"])
+            for name, action_id in action["dependency_actions"].items()
+        },
+    }
+
+
 class ActionRunner:
     def __init__(self, engine):
         self.engine = engine
@@ -71,19 +88,7 @@ class ActionRunner:
             raise RuntimeError("No execution specification was captured; submit a new command.")
         key = (task_set, task)
         directory = job_directory(self.root, key, action["action_id"], create=True)
-        captured = copy.deepcopy(action)
-        captured.update({"task_set": task_set, "task": task})
-        config = {
-            "schema_version": 1,
-            "action": captured,
-            "execution": action["execution"],
-            "task_path": str(self.root.joinpath(*key)),
-            "job_path": str(directory),
-            "dependency_results": {
-                name: copy.deepcopy(self.engine._states[key]["actions"][action_id]["result"])
-                for name, action_id in action["dependency_actions"].items()
-            },
-        }
+        config = action_configuration(self.engine, key, action)
         atomic_json_write(directory / "input.json", config)
         child = subprocess.Popen(
             [sys.executable, str(DIRECTORY / "worker.py"), str(directory / "input.json")],

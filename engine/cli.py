@@ -107,9 +107,9 @@ def main(argv=None):
                     receipts = []
                     for action in (
                         "redesign",
-                        "commit-desing",
-                        "implement",
-                        "commit-impl",
+                        "commit_desing",
+                        "impl",
+                        "commit_impl",
                         "local_bench",
                         "local_bench_analyze",
                         "export_to_codimango",
@@ -119,7 +119,7 @@ def main(argv=None):
                             "action": action,
                             "parameters": (
                                 parameters
-                                if action in ("redesign", "implement", "local_bench_analyze")
+                                if action in ("redesign", "impl", "local_bench_analyze")
                                 else {}
                             ),
                         }
@@ -132,6 +132,8 @@ def main(argv=None):
                         {"request_id": request_id, "action": args.action, "parameters": parameters},
                     )
                 print(json.dumps(result, indent=2), flush=True)
+                if result.get("type") == "completed":
+                    return 0 if result["outcome"] == "succeeded" else 1
                 if not args.wait:
                     return 0
                 pending = {item["action_id"] for item in result.get("actions", [result])}
@@ -144,7 +146,15 @@ def main(argv=None):
                         if action["status"] == "completed" and action["outcome"] != "succeeded"
                     ]
                     if failures or all(action["status"] == "completed" for action in actions):
-                        print(json.dumps({"actions": actions}, indent=2))
+                        for action in actions:
+                            if action["status"] == "completed":
+                                print(json.dumps({
+                                    "task_set": args.task_set,
+                                    "task": args.task,
+                                    "action_id": action["action_id"],
+                                    "type": "completed",
+                                    **{key: action[key] for key in ("outcome", "result", "error")},
+                                }, indent=2))
                         return 1 if failures else 0
                     time.sleep(0.5)
         print(json.dumps(result, indent=2))
@@ -153,7 +163,7 @@ def main(argv=None):
         print(str(error), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        # Leaving the client does not silently cancel a durable job.
+        # Leaving the client does not silently cancel an async job.
         return 130
 
 

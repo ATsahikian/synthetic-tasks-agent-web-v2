@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "actions": {
+    "prepare": {
+      "dependencies": [],
+      "mode": "async",
+      "handler": "action_command",
+      "runner": {
+        "argv": [
+          "python3",
+          "-c",
+          "print('Prepared task')"
+        ]
+      }
+    },
+    "process": {
+      "dependencies": [
+        "prepare"
+      ],
+      "mode": "async",
+      "handler": "action_command",
+      "runner": {
+        "argv": [
+          "python3",
+          "-c",
+          "print('Processed task')"
+        ]
+      }
+    },
+    "summarize": {
+      "dependencies": [
+        "process"
+      ],
+      "mode": "async",
+      "handler": "action_command",
+      "runner": {
+        "argv": [
+          "python3",
+          "-c",
+          "print('Summarized task')"
+        ]
+      }
+    }
+  }
+}

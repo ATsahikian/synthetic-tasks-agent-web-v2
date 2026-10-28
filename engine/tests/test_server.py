@@ -88,12 +88,12 @@ class ServerTests(EngineFixture):
         self.assertEqual(self.finished(self.engine, process["action_id"])["outcome"], "succeeded")
         status, state = self.request("GET", task_url + "/state")
         self.assertEqual(state["actions"][prepare["action_id"]]["result"], {"exit_code": 0, "ok": True})
-        self.assertEqual(state["revision"], 6)
+        self.assertEqual(state["revision"], 5)
         status, tail = self.request("GET", task_url + "/events?after=2")
         self.assertEqual(status, 200)
-        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5, 6])
-        self.assertEqual([event["type"] for event in tail["events"]], ["started", "completed", "started", "completed"])
-        self.assertEqual(tail["events"][1]["payload"]["result"], {"exit_code": 0, "ok": True})
+        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5])
+        self.assertEqual([event["type"] for event in tail["events"]], ["completed", "started", "completed"])
+        self.assertEqual(tail["events"][0]["payload"]["result"], {"exit_code": 0, "ok": True})
         status, empty_tail = self.request("GET", task_url + "/events?after=999")
         self.assertEqual(empty_tail["events"], [])
 
@@ -106,7 +106,7 @@ class ServerTests(EngineFixture):
             ))
         self.assertTrue(all(response == responses[0] for response in responses))
         self.assertEqual(responses[0][0], 201)
-        self.assertEqual(self.engine.state("set-one", "task-one")["revision"], 2)
+        self.assertEqual(self.engine.state("set-one", "task-one")["revision"], 1)
 
     def test_http_errors_are_json_and_events_are_read_only(self):
         task_url = "/api/tasks/set-one/task-one"

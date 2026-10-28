@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
+from engine.actions import prepare_execution
 from engine.core import Engine, acknowledgment
 from engine.runner import ActionRunner, job_directory
 from engine.storage import atomic_json_write
@@ -18,6 +19,16 @@ def git(directory, *arguments):
         ["git", "-C", str(directory), *arguments], check=True,
         capture_output=True, text=True, timeout=15,
     ).stdout.strip()
+
+
+def task_repository(root):
+    git(root, "init", "--initial-branch=main")
+    git(root, "config", "user.name", "Engine fixture")
+    git(root, "config", "user.email", "engine@example.test")
+    git(root, "config", "core.hooksPath", str(root / ".git" / "hooks"))
+    (root / ".gitignore").write_text("**/.review/\n")
+    git(root, "add", "--", ".gitignore")
+    git(root, "commit", "--no-gpg-sign", "-m", "Initial task project")
 
 
 def export_repository(base):
@@ -82,7 +93,9 @@ class EngineFixture(unittest.TestCase):
     def set_actions(self, definitions):
         definitions = copy.deepcopy(definitions)
         for definition in definitions.values():
-            definition.setdefault("runner", {"argv": [sys.executable, "-c", "pass"]})
+            definition.setdefault("handler", "action_command")
+            if definition["handler"] == "action_command":
+                definition.setdefault("runner", {"argv": [sys.executable, "-c", "pass"]})
         self.config.write_text(json.dumps({"schema_version": 1, "actions": definitions}), "utf-8")
 
     def command(self, engine, name, *, request_id=None, parameters=None):
@@ -90,6 +103,24 @@ class EngineFixture(unittest.TestCase):
         if parameters is not None:
             body["parameters"] = parameters
         return engine.command("set-one", "task-one", body)
+
+    def legacy_command(self, engine, name, *, request_id=None, parameters=None, mode=None):
+        """Create a pre-refactor waiting event to exercise real history compatibility."""
+        definition = engine.actions[name]
+        request = {"request_id": request_id or str(uuid.uuid4()), "action": name, "parameters": parameters or {}}
+        payload = {
+            "action": name,
+            "parameters": request["parameters"],
+            "dependencies": definition["dependencies"],
+            "execution": prepare_execution(definition, request["parameters"]),
+        }
+        if "execution_type" in definition:
+            payload["execution_type"] = definition["execution_type"]
+        if mode is not None:
+            payload["mode"] = mode
+        return engine._commit(
+            ("set-one", "task-one"), request, "command", "waiting", str(uuid.uuid4()), payload,
+        )
 
     def finish(self, engine, action_id, *, outcome="succeeded", result=None, error=None):
         key = ("set-one", "task-one")

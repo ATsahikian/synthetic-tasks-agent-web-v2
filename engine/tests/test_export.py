@@ -4,7 +4,7 @@ import subprocess
 from unittest.mock import patch
 
 from engine.actions import load_actions
-from engine.export import export_task
+from engine.actions.action_export_to_codimango import export_task
 from engine.tests.support import EngineFixture, export_repository, git
 
 
@@ -147,7 +147,7 @@ class ExportTests(EngineFixture):
         self.assertEqual(git(self.remote, "rev-parse", "refs/heads/main"), initial)
 
     def test_source_changes_during_copy_stop_before_commit(self):
-        from engine.export import shutil
+        from engine.actions.action_export_to_codimango import shutil
 
         original = shutil.copytree
 
@@ -156,7 +156,7 @@ class ExportTests(EngineFixture):
             self.script.write_text("Concurrent source change")
             return result
 
-        with patch("engine.export.shutil.copytree", side_effect=copy):
+        with patch("engine.actions.action_export_to_codimango.shutil.copytree", side_effect=copy):
             with self.assertRaisesRegex(RuntimeError, "changed while copying"):
                 self.export()
         self.assertFalse(self.destination.exists())
@@ -165,7 +165,8 @@ class ExportTests(EngineFixture):
         self.set_actions({
             "export": {
                 "dependencies": [],
-                "runner": {"builtin": "export_to_codimango", "repo_path": "cyber-bench"},
+                "handler": "action_export_to_codimango",
+                "runner": {"repo_path": "cyber-bench"},
             }
         })
         self.assertEqual(load_actions(self.config)["export"]["runner"]["repo_path"], str(self.checkout))

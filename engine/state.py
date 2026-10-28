@@ -8,6 +8,13 @@ from .errors import EngineError
 
 
 OUTCOMES = {"succeeded", "failed", "cancelled", "timed_out"}
+ACTION_FIELDS = {"action", "parameters", "dependencies", "execution", "execution_type", "mode"}
+
+
+def action_mode(payload):
+    """Normalize historical detached worker modes when reading accepted commands."""
+    mode = payload.get("mode", "async")
+    return "async" if mode == "durable" else mode
 
 
 def empty_state(key):
@@ -75,7 +82,7 @@ def refresh_derived_state(state):
 
 def request_from_event(event):
     payload = event["payload"]
-    if event["type"] == "waiting":
+    if "action" in payload:
         return "command", {
             "request_id": event["request_id"],
             "action": payload["action"],
@@ -94,6 +101,29 @@ def request_from_event(event):
         return "start", body
     # Retain replay support for reports written before the server owned starts.
     return "report", body
+
+
+def validate_action_payload(payload):
+    if not {"action", "parameters", "dependencies"}.issubset(payload) or set(payload) - (
+        ACTION_FIELDS | {"resources", "invalidated_by"}  # Older accepted commands.
+    ):
+        raise EngineError("Invalid action payload.")
+    validate_name(payload["action"])
+    if not isinstance(payload["parameters"], dict):
+        raise EngineError("Action parameters must be an object.")
+    dependencies = payload["dependencies"]
+    if not isinstance(dependencies, list):
+        raise EngineError("Dependencies must be an array.")
+    for dependency in dependencies:
+        validate_name(dependency)
+    if len(set(dependencies)) != len(dependencies) or payload["action"] in dependencies:
+        raise EngineError("Invalid action dependencies.")
+    if "execution" in payload and not isinstance(payload["execution"], dict):
+        raise EngineError("Invalid execution specification.")
+    if payload.get("execution_type", "script") not in ("script", "agent"):
+        raise EngineError("Invalid execution type.")
+    if action_mode(payload) not in ("sync", "async"):
+        raise EngineError("Invalid action mode.")
 
 
 def validate_event(event, revision):
@@ -135,30 +165,7 @@ def validate_event(event, revision):
     if not isinstance(payload, dict):
         raise EngineError("Event payload must be an object.")
     if event["type"] == "waiting":
-        if not {"action", "parameters", "dependencies"}.issubset(payload) or set(payload) - {
-            "action",
-            "parameters",
-            "dependencies",
-            "execution",
-            "execution_type",
-            "resources",  # Ignored when replaying older event history.
-            "invalidated_by",  # Ignored when replaying older event history.
-        }:
-            raise EngineError("Invalid waiting payload.")
-        validate_name(payload["action"])
-        if not isinstance(payload["parameters"], dict):
-            raise EngineError("Action parameters must be an object.")
-        dependencies = payload["dependencies"]
-        if not isinstance(dependencies, list):
-            raise EngineError("Dependencies must be an array.")
-        for dependency in dependencies:
-            validate_name(dependency)
-        if len(set(dependencies)) != len(dependencies) or payload["action"] in dependencies:
-            raise EngineError("Invalid action dependencies.")
-        if "execution" in payload and not isinstance(payload["execution"], dict):
-            raise EngineError("Invalid execution specification.")
-        if payload.get("execution_type", "script") not in ("script", "agent"):
-            raise EngineError("Invalid execution type.")
+        validate_action_payload(payload)
     elif event["type"] == "cancel_requested":
         if payload:
             raise EngineError("Invalid cancellation payload.")
@@ -170,7 +177,16 @@ def validate_event(event, revision):
                 raise EngineError("Invalid completion outcome.")
             if payload.get("error") is not None and not isinstance(payload["error"], str):
                 raise EngineError("Completion error must be a string or null.")
-        if set(payload) != expected or not isinstance(payload["dependency_actions"], dict):
+        if "action" in payload:
+            fields = set(payload) & ACTION_FIELDS
+            validate_action_payload({name: payload[name] for name in fields})
+            expected |= fields
+            mode = action_mode(payload)
+            if (event["type"] == "started" and mode != "async") or (
+                event["type"] == "completed" and mode != "sync"
+            ):
+                raise EngineError("Event does not match the action lifecycle.")
+        if set(payload) != expected or not isinstance(payload.get("dependency_actions"), dict):
             raise EngineError("Invalid execution payload.")
     if not isinstance(event["request_fingerprint"], str) or not re.fullmatch(
         r"[0-9a-f]{64}", event["request_fingerprint"]
@@ -187,7 +203,7 @@ def reduce_event(state, event):
     state = copy.deepcopy(state)
     payload = event["payload"]
     action_id = event["action_id"]
-    if event["type"] == "waiting":
+    if "action" in payload:
         if action_id in state["actions"]:
             raise EngineError("Action ID was already used.")
         current_id = state["current_actions"].get(payload["action"])
@@ -214,10 +230,12 @@ def reduce_event(state, event):
             "completed_sequence": None,
             "execution": payload.get("execution"),
             "execution_type": payload.get("execution_type"),
+            # Pre-refactor accepted actions used detached workers for every handler.
+            "mode": action_mode(payload),
             "cancel_requested": False,
         }
         state["current_actions"][payload["action"]] = action_id
-    else:
+    if event["type"] != "waiting":
         action = state["actions"].get(action_id)
         if action is None:
             raise EngineError("Unknown action ID.", status=404, code="action_not_found")
@@ -243,6 +261,8 @@ def reduce_event(state, event):
             raise EngineError(
                 "Action is already started.", status=409, code="action_already_started"
             )
+        if event["type"] == "started" and action["mode"] == "sync":
+            raise EngineError("Synchronous actions do not emit started events.")
         references = (
             dependency_references(state, action)
             if action["status"] == "waiting"

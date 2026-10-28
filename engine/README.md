@@ -1,8 +1,13 @@
 # Python task event engine
 
 The engine discovers task folders and accepts action commands through REST.
-When dependencies are ready, the server stores a start event and launches a
-detached worker. The runner and worker communicate through durable job files:
+All action implementations live in `actions/`, with one handler class per action
+file named `action_<action-name>.py`, using the registered action name exactly
+(for example, `action_commit_impl.py` or `action_local_bench.py`).
+Synchronous handlers run inline and record their result or error in one
+completed event. Asynchronous handlers record a started event and launch a detached
+worker, then record a completed event with the result or error.
+The runner and worker communicate through durable job files:
 input.json describes the action, output.log captures its output, cancel.json
 requests cancellation, and result.json records completion. The runner reads
 results and creates completion events; clients submit commands and cancellations.
@@ -10,7 +15,7 @@ results and creates completion events; clients submit commands and cancellations
 ## Run
 
 Python 3.12 on Linux is required. There are no third-party Python dependencies.
-Exports also require Git.
+Design commits and exports also require Git.
 
 ~~~bash
 cd synthetic-tasks-agent-web-v2/engine
@@ -33,7 +38,7 @@ Options:
 ~~~bash
 python3 server.py --tasks-root ../../synthetic-tasks-project-v2 --port 4182
 python3 server.py --tasks-root /path/to/project
-python3 server.py --actions-file actions.json
+python3 server.py --actions-file actions/actions.json
 ~~~
 
 Runtime state is stored in the task project, following v1's .review layout.
@@ -68,27 +73,68 @@ Discovery runs at startup, so restart after adding or removing task folders.
 
 ## Actions and event semantics
 
-Edit actions.json to define the available action names and their dependencies.
-The local workflow is redesign → commit-desing → implement → commit-impl →
+Edit `actions/actions.json` to define the available action names and dependencies.
+The local workflow is redesign → commit_desing → impl → commit_impl →
 local_bench → local_bench_analyze. export_to_codimango depends directly on
-implement. custom and troubleshoot are independent actions.
-commit-impl records approval of an implementation with a passing oracle; the local
+impl. custom and troubleshoot are independent actions.
+commit_desing commits only the task's design.md in its existing Git repository
+and records approval of the redesign. The task project must be inside a Git
+repository with a configured author. Its result includes the commit hash;
+unchanged designs reuse their existing commit. Unrelated staged files are preserved.
+commit_impl records approval of an implementation with a passing oracle; the local
 benchmark consumes that approved implementation result.
-actions.demo.json provides an executable demonstration graph
+`actions/actions.demo.json` provides an executable demonstration graph
 prepare → process → summarize.
 Dependencies must refer to known actions and cannot contain cycles. Changes take
 effect on restart and apply to newly accepted commands. Accepted commands retain their
 original parameters and dependency definitions in their events.
 
-Every new command creates a distinct action ID and records a waiting event.
-Commands with unmet prerequisites remain waiting with waiting_reason set to
-dependencies. When successful prerequisites are available, the server captures
-their action IDs, durably records a started event, and invokes the initiation hook.
-It then waits for the worker's result.json. Successful completion automatically starts
-any queued commands whose dependencies are now satisfied.
+Every new command creates a distinct action ID. Each action handler inherits from
+`SyncActionHandler` or `AsyncActionHandler` in `actions/base.py` and implements
+`run(config, execute, output_path)`. The registry in `actions/registry.py` resolves
+the class named by each definition's `handler` field. The class and its file have
+the same name, for example `action_commit_desing` in `actions/action_commit_desing.py`.
+Each handler owns its runner settings, parameter validation, and execution preparation.
+Adding an action class requires its file and a configuration reference.
 
-- Clients cannot submit start or completion events. Every action, including a
-  short action, has a server-created start before completion.
+~~~json
+"commit_desing": {
+  "dependencies": ["redesign"],
+  "handler": "action_commit_desing",
+  "mode": "sync"
+}
+~~~
+
+| Mode | Actions | Execution events |
+| --- | --- | --- |
+| `sync` | commit_desing, commit_impl | completed, including the result or error |
+| `async` | redesign, impl, local_bench, local_bench_analyze, export_to_codimango, custom, troubleshoot, configured commands | started, then completed, including the result or error |
+
+`mode` is captured when the command is accepted. It defaults to the handler's mode
+and must match that handler. `execution_type` continues to describe agent or script
+execution independently of the lifecycle.
+Action names use underscores between words. The implementation approval action
+is `commit_impl`, implemented in `action_commit_impl.py`. Design approval uses
+`commit_desing`, implemented in `action_commit_desing.py`; implementation consumes
+that approved design and rejects later design or template changes.
+The implementation action is `impl`, implemented in `action_impl.py`.
+Action names and handler class names are independent. Older dependency names such as
+commit-desing, implement, and commit-impl can still be used with explicit handler references.
+Accepted commands capture the handler reference alongside its prepared settings.
+Configurations and pending executions using the previous runner selector must be
+migrated to explicit handler references before running this version.
+
+Ready synchronous commands record exactly one completed event, and ready async
+commands record exactly two events: started and completed. Their first event also
+captures the command's parameters, dependency definitions, and execution settings.
+Commands with unmet prerequisites record a waiting event with waiting_reason set
+to dependencies. Once dependencies succeed, the server captures their action IDs
+and runs the appropriate lifecycle. Queued sync actions therefore have waiting
+and completed events; queued async actions have waiting, started, and completed.
+Successful completion automatically runs newly ready queued commands.
+
+- Clients cannot submit start or completion events. The server creates all
+  execution events. Synchronous actions have no started event or worker files.
 - Worker completion outcomes are succeeded, failed, cancelled, or timed_out.
 - Failed prerequisites block downstream work. Submit another command to retry.
 - Different action types can be active simultaneously. Only one waiting or
@@ -102,8 +148,9 @@ any queued commands whose dependencies are now satisfied.
 - A pending or failed prerequisite replacement blocks new consumers. Its prior
   successful result remains available in history.
 
-Every accepted action requires a runner definition. Configure a built-in action
-or a command with an argv array in actions.json. The command runner supports cwd,
+Every action requires a `handler` reference in `actions/actions.json`. Handler settings
+are optional and go in `runner`. Configured commands use `"handler": "action_command"`
+and a `runner` object containing an argv array. The command runner supports cwd,
 env, input, timeout_ms, termination_grace_ms, and success_result. Known placeholders
 such as {task_path}, {job_path}, and {parameters.prompt} are expanded in command
 values. Arguments are passed directly to the executable. Commands must exit with
@@ -117,15 +164,15 @@ after exit, cancellation, or timeout. The runner checks job results every 200 ms
 
 ## Export to Codimango
 
-export_to_codimango is a script action that depends only on implement. It
+export_to_codimango is a script action that depends only on impl. It
 copies the task into the Cyber Bench checkout, commits its files, and pushes to
 origin/main. Codimango picks up the pushed changes automatically.
 
-Set the destination in actions.json:
+Set the destination in `actions/actions.json`:
 
 ~~~json
+"handler": "action_export_to_codimango",
 "runner": {
-  "builtin": "export_to_codimango",
   "repo_path": "/home/atsagikyan/AAI/cyber-bench-atsagikyan"
 }
 ~~~
@@ -191,9 +238,13 @@ writes cancel.json and the worker stops its command before recording the outcome
 Clients cannot submit events, choose sequences, or report action results.
 The /events endpoint is read-only; there is no /completions endpoint.
 The server returns action_id, event_id, sequence, and type as its acknowledgment.
-Command acknowledgments identify the original waiting event, even when the
-server has already started the action. Retrieve state separately to see its
-current status and outcome.
+A ready synchronous command returns type completed and includes outcome, result,
+and error. A ready async command returns type started. A queued command returns
+type waiting, and retries retain that original acknowledgment after execution.
+Retrieve state or event history for subsequent results.
+The CLI prints a ready synchronous result once, including with --wait, and exits
+with status 1 when that action fails. With --wait, async commands print their
+start acknowledgment and their completion result.
 
 Commands return HTTP 201; cancellations and reads return HTTP 200. Validation failures
 return 400, missing tasks/actions 404, and transition or request-ID conflicts
@@ -206,7 +257,7 @@ return 400, missing tasks/actions 404, and transition or request-ID conflicts
 ### Demonstration workflow
 
 After adding set-one/task-one to the task root, start the server with
---actions-file engine/actions.demo.json from the repository root. In another
+--actions-file engine/actions/actions.demo.json from the repository root. In another
 terminal, queue the dependent commands before their prerequisites:
 
 ~~~bash
@@ -275,12 +326,16 @@ Snapshot failure does not discard an already durable event.
 
 To check restoration, stop the server, optionally delete only a task's job.json,
 and run the same startup command again. State and request-ID deduplication are
-rebuilt from events. Ready commands resume execution after replay. Started actions
+rebuilt from events. Ready queued commands resume execution after replay. Started actions
 reconnect to live workers or consume results saved while the server was offline.
 If a worker is dead and has no saved result, the runner cleans up its remaining
 processes and marks the action failed. Submit a new command to retry; started
 actions are never automatically relaunched. Historical events remain replayable.
 Old starts without worker records are marked failed during recovery.
+Historical commands without mode or with `mode: durable` replay as `async`, keeping
+their detached worker lifecycle even when their handler now uses sync for new
+commands. Existing events retain their original contents. Ready sync results replay
+directly from their completed event without running the handler again.
 A malformed or missing snapshot does not affect recovery.
 Tasks whose discovery markers are removed retain readable history at their
 state/events URLs as long as their directories and .review files remain.
@@ -306,7 +361,8 @@ From the parent v2 directory:
 python3 -m unittest discover -s engine/tests -v
 ~~~
 
-Tests cover discovery, REST requests, worker execution, cancellation, timeouts,
+Tests cover synchronous results and errors, both action lifecycles, discovery,
+REST requests, worker execution, cancellation, timeouts,
 dependency transitions, parallel requests, deduplication, captured inputs, stale
 results, persistence failures, and restart recovery, including server-owned
 starts, launch ordering, task-local storage, project moves, and task lock ownership.

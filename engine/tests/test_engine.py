@@ -95,7 +95,7 @@ class EngineTests(EngineFixture):
         engine = self.make_engine()
         original = self.command(engine, "prepare", request_id="command-one")
         self.assertEqual(original, self.command(engine, "prepare", request_id="command-one", parameters={}))
-        self.assertEqual(engine.state("set-one", "task-one")["revision"], 2)
+        self.assertEqual(engine.state("set-one", "task-one")["revision"], 1)
         with self.assertRaises(EngineError) as caught:
             self.command(engine, "prepare", request_id="command-one", parameters={"different": True})
         self.assertEqual(caught.exception.code, "request_id_conflict")
@@ -121,7 +121,7 @@ class EngineTests(EngineFixture):
         with self.assertRaises(EngineError) as caught:
             self.command(engine, "prepare")
         self.assertEqual(caught.exception.code, "action_already_active")
-        self.assertEqual(engine.state("set-one", "task-one")["revision"], 2)
+        self.assertEqual(engine.state("set-one", "task-one")["revision"], 1)
 
     def test_results_are_preserved_and_staleness_is_transitive(self):
         engine = self.make_engine()
@@ -178,11 +178,11 @@ class EngineTests(EngineFixture):
                 lambda acknowledgment: self.finish(engine, acknowledgment["action_id"]),
                 commands,
             ))
-        self.assertEqual(sorted(item["sequence"] for item in commands), list(range(1, 25, 2)))
-        self.assertEqual(sorted(item["sequence"] for item in completions), list(range(25, 37)))
-        self.assertEqual(engine.state("set-one", "task-one")["revision"], 36)
+        self.assertEqual(sorted(item["sequence"] for item in commands), list(range(1, 13)))
+        self.assertEqual(sorted(item["sequence"] for item in completions), list(range(13, 25)))
+        self.assertEqual(engine.state("set-one", "task-one")["revision"], 24)
         engine.close()
-        self.assertEqual(self.make_engine().state("set-one", "task-one")["revision"], 36)
+        self.assertEqual(self.make_engine().state("set-one", "task-one")["revision"], 24)
 
     def test_concurrent_duplicate_commands_commit_once(self):
         engine = self.make_engine()
@@ -192,7 +192,7 @@ class EngineTests(EngineFixture):
                 range(24),
             ))
         self.assertTrue(all(response == responses[0] for response in responses))
-        self.assertEqual(engine.state("set-one", "task-one")["revision"], 2)
+        self.assertEqual(engine.state("set-one", "task-one")["revision"], 1)
 
     def test_start_is_durable_before_initiation_and_retries_do_not_reinitiate(self):
         calls = []
@@ -200,7 +200,7 @@ class EngineTests(EngineFixture):
         def initiate(task_set, task, action):
             log = self.root / task_set / task / ".review" / "events.jsonl"
             events = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
-            self.assertEqual([event["type"] for event in events], ["waiting", "started"])
+            self.assertEqual([event["type"] for event in events], ["started"])
             self.assertEqual(events[-1]["action_id"], action["action_id"])
             self.assertEqual(action["status"], "started")
             self.assertEqual(action["parameters"], {"input": 7})
@@ -222,7 +222,7 @@ class EngineTests(EngineFixture):
         self.assertEqual(calls, [original["action_id"]])
         self.finish(restored, original["action_id"])
 
-    def test_failed_start_persistence_prevents_initiation_and_restart_resumes(self):
+    def test_failed_start_persistence_prevents_initiation_and_restart_retry_starts(self):
         initiate = mock.Mock()
         engine = self.make_engine(initiate=initiate)
         append = engine._store.append
@@ -244,7 +244,7 @@ class EngineTests(EngineFixture):
         self.assertEqual(acknowledgment["sequence"], 1)
         initiate.assert_called_once()
         self.assertEqual(initiate.call_args.args[2]["action_id"], acknowledgment["action_id"])
-        self.assertEqual(restored.state("set-one", "task-one")["revision"], 2)
+        self.assertEqual(restored.state("set-one", "task-one")["revision"], 1)
 
     def test_restart_starts_commands_unblocked_by_durable_completion(self):
         initiate = mock.Mock()
@@ -266,7 +266,7 @@ class EngineTests(EngineFixture):
         engine.close()
         restored = self.make_engine(initiate=initiate)
         completed = self.finish(restored, prepare)
-        self.assertEqual(completed["sequence"], 4)
+        self.assertEqual(completed["sequence"], 3)
         self.assertEqual(initiate.call_count, 2)
         self.assertEqual(initiate.call_args.args[2]["action_id"], process)
         self.assertEqual(restored.state("set-one", "task-one")["actions"][process]["status"], "started")
@@ -290,7 +290,7 @@ class EngineTests(EngineFixture):
         engine = self.make_engine()
         # Reproduce the original milestone's durable history, before server-owned starts.
         with mock.patch.object(engine, "_start_ready"):
-            prepare = self.command(engine, "prepare")["action_id"]
+            prepare = self.legacy_command(engine, "prepare")["action_id"]
             engine._commit(
                 ("set-one", "task-one"),
                 {"request_id": "old-finish", "action_id": prepare, "type": "completed",
@@ -298,7 +298,7 @@ class EngineTests(EngineFixture):
                 "report", "completed", prepare,
                 {"dependency_actions": {}, "outcome": "succeeded", "result": None, "error": None},
             )
-            process = self.command(engine, "process")["action_id"]
+            process = self.legacy_command(engine, "process")["action_id"]
             engine._commit(
                 ("set-one", "task-one"),
                 {"request_id": "old-start", "action_id": process, "type": "started"},
@@ -336,9 +336,13 @@ class EngineTests(EngineFixture):
 
     def test_legacy_invalidation_metadata_is_ignored_during_replay(self):
         engine = self.make_engine()
-        self.complete_action(engine, "prepare")
-        process = self.complete_action(engine, "process")
-        summarize = self.complete_action(engine, "summarize")
+        completed = []
+        for name in ("prepare", "process", "summarize"):
+            action_id = self.legacy_command(engine, name)["action_id"]
+            engine._start_ready(("set-one", "task-one"))
+            self.finish(engine, action_id)
+            completed.append(action_id)
+        _, process, summarize = completed
         state = engine.state("set-one", "task-one")
         engine.close()
 
@@ -408,7 +412,7 @@ class EngineTests(EngineFixture):
         with self.assertRaises(CorruptLogError):
             self.make_engine()
         file.write_bytes(original)
-        self.assertEqual(self.make_engine().state("set-one", "task-one")["revision"], 2)
+        self.assertEqual(self.make_engine().state("set-one", "task-one")["revision"], 1)
 
     def test_snapshot_failure_does_not_lose_durable_event(self):
         engine = self.make_engine()
@@ -443,7 +447,7 @@ class EngineTests(EngineFixture):
         restored = self.make_engine()
         response = self.command(restored, "prepare", request_id="uncertain")
         self.assertEqual(response["sequence"], 1)
-        self.assertEqual(restored.state("set-one", "task-one")["revision"], 2)
+        self.assertEqual(restored.state("set-one", "task-one")["revision"], 1)
 
     def test_exclusive_task_ownership_and_independent_projects(self):
         engine = self.make_engine()
@@ -520,15 +524,14 @@ class EngineTests(EngineFixture):
             self.make_engine()
         self.assertEqual(list(outside.iterdir()), [])
 
-    def test_command_without_runner_does_not_persist_an_event(self):
+    def test_action_without_handler_is_rejected_at_startup(self):
         self.config.write_text(json.dumps({
             "schema_version": 1, "actions": {"prepare": {"dependencies": []}},
         }))
-        engine = self.make_engine()
         with self.assertRaises(EngineError) as caught:
-            self.command(engine, "prepare")
-        self.assertIn("configure runner", str(caught.exception))
-        self.assertEqual(engine.state("set-one", "task-one")["revision"], 0)
+            self.make_engine()
+        self.assertIn("action class handler", str(caught.exception))
+        self.assertFalse(self.review.exists())
 
     def test_invalid_definitions_and_request_validation(self):
         for actions in (

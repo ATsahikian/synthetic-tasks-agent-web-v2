@@ -57,6 +57,7 @@ class RunnerTests(EngineFixture):
         return {
             "dependencies": list(dependencies),
             "execution_type": "script",
+            "handler": "action_command",
             "runner": {"argv": [sys.executable, "-c", text], "termination_grace_ms": 100, **runner},
         }
 
@@ -134,8 +135,9 @@ class RunnerTests(EngineFixture):
 
         self.set_actions({"one": self.script('print("one")'), "two": self.script('print("two")')})
         engine = self.make_engine()
-        self.command(engine, "one")
-        second = self.command(engine, "two")["action_id"]
+        self.legacy_command(engine, "one")
+        engine._start_ready(("set-one", "task-one"))
+        second = self.legacy_command(engine, "two")["action_id"]
         history = engine.events("set-one", "task-one")["events"][:3]
         state = empty_state(("set-one", "task-one"))
         for event in history:
@@ -167,7 +169,7 @@ class RunnerTests(EngineFixture):
         final = self.make_engine(workers=True)
         self.assertEqual(self.finished(final, receipt["action_id"])["outcome"], "succeeded")
         self.assertEqual(count.read_text(), "launch\n")
-        self.assertEqual(final.state("set-one", "task-one")["revision"], 3)
+        self.assertEqual(final.state("set-one", "task-one")["revision"], 2)
 
     def test_configuration_is_captured_for_a_waiting_command(self):
         self.set_actions(
@@ -246,7 +248,7 @@ class RunnerTests(EngineFixture):
         self.wait_for(lambda: not group_exists(group))
         engine.close()
         restored = self.make_engine(workers=True)
-        self.assertEqual(restored.state("set-one", "task-one")["revision"], 3)
+        self.assertEqual(restored.state("set-one", "task-one")["revision"], 2)
 
     def test_launch_receipt_failure_stops_the_untracked_worker(self):
         from engine import runner
@@ -296,7 +298,8 @@ class RunnerTests(EngineFixture):
 
     def test_restart_fails_legacy_start_without_execution(self):
         engine = self.make_engine()
-        running = self.command(engine, "prepare")["action_id"]
+        running = self.legacy_command(engine, "prepare")["action_id"]
+        engine._start_ready(("set-one", "task-one"))
         engine.close()
         log = self.review / "events.jsonl"
         events = [json.loads(line) for line in log.read_text().splitlines()]
@@ -325,14 +328,14 @@ class RunnerTests(EngineFixture):
             {
                 "redesign": {"dependencies": []},
                 "approve": {"dependencies": ["redesign"]},
-                "implement": {"dependencies": ["approve"]},
+                "impl": {"dependencies": ["approve"]},
                 "custom": {"dependencies": []},
             }
         )
         engine = self.make_engine()
         self.complete_action(engine, "redesign")
         approval = self.complete_action(engine, "approve")
-        implementation = self.complete_action(engine, "implement")
+        implementation = self.complete_action(engine, "impl")
         self.complete_action(engine, "custom")
         state = engine.state("set-one", "task-one")
         self.assertFalse(state["actions"][approval]["stale"])

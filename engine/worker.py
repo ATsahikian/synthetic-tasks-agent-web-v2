@@ -13,9 +13,8 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from engine.actions import canonical_json
+from engine.actions import canonical_json, run_action
 from engine.storage import atomic_json_write
-from engine.workflow import result_marker, run_builtin
 
 
 def process_identity(pid):
@@ -219,20 +218,7 @@ def main(config_path):
                 if (job_path / "cancel.json").exists():
                     executor.outcome = "cancelled"
                     raise RuntimeError("Action cancelled.")
-                if "builtin" in config["execution"]:
-                    result = run_builtin(config, executor.execute, job_path / "output.log")
-                else:
-                    code = executor.execute(config["execution"])
-                    if code != 0:
-                        raise RuntimeError(f"Command exited with status {code}.")
-                    result = result_marker(job_path / "output.log")
-                    expected = config["execution"].get("success_result", {})
-                    if any(
-                        canonical_json(result.get(key)) != canonical_json(value)
-                        for key, value in expected.items()
-                    ):
-                        raise RuntimeError("Command did not emit its required SYNTHETIC_RESULT.")
-                    result = {"exit_code": code, **result}
+                result = run_action(config, executor.execute, job_path / "output.log")
                 completion = {"outcome": "succeeded", "result": result, "error": None}
             except BaseException as error:
                 output.write(f"[engine] {error}\n".encode("utf-8", errors="replace"))

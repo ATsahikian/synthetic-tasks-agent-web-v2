@@ -5,7 +5,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .actions import canonical_json, fingerprint, load_actions, validate_name, validate_request_id
+from .actions import (
+    canonical_json, fingerprint, load_actions, prepare_execution, run_action,
+    validate_name, validate_request_id,
+)
 from .discovery import discover_tasks, validate_component
 from .errors import CorruptLogError, EngineError
 from .state import dependency_references, empty_state, reduce_event
@@ -36,7 +39,7 @@ def validate_body(body, required, optional=()):
 
 
 def acknowledgment(key, event):
-    return {
+    receipt = {
         "task_set": key[0],
         "task": key[1],
         "action_id": event["action_id"],
@@ -44,6 +47,12 @@ def acknowledgment(key, event):
         "sequence": event["sequence"],
         "type": event["type"],
     }
+    if event["type"] == "completed":
+        receipt.update({
+            name: copy.deepcopy(event["payload"][name])
+            for name in ("outcome", "result", "error")
+        })
+    return receipt
 
 
 class Engine:
@@ -59,7 +68,7 @@ class Engine:
         self._store = None
         self._runner = None
         self.catalog, self._discovered = discover_tasks(tasks_root)
-        self.actions = load_actions(actions_file or ENGINE_DIRECTORY / "actions.json")
+        self.actions = load_actions(actions_file or ENGINE_DIRECTORY / "actions" / "actions.json")
         self._states = {}
         self._events = {}
         self._requests = {}
@@ -247,11 +256,24 @@ class Engine:
         return acknowledgment(key, event)
 
     def _start_ready(self, key):
-        """Persist each start before launching its worker."""
+        """Complete sync handlers inline; persist async starts before launching."""
         while self._states[key]["ready_action_ids"]:
             self._check_available()
             action_id = self._states[key]["ready_action_ids"][0]
             action = self._states[key]["actions"][action_id]
+            if action["mode"] == "sync":
+                captured = copy.deepcopy(action)
+                captured["dependency_actions"] = dependency_references(self._states[key], action)
+                self._commit_completion(
+                    key,
+                    {
+                        "request_id": f"engine:completion:{action_id}",
+                        "action_id": action_id,
+                        "type": "completed",
+                        **self._execute_sync(key, captured),
+                    },
+                )
+                continue
             self._commit(
                 key,
                 {
@@ -264,24 +286,42 @@ class Engine:
                 action_id,
                 {"dependency_actions": dependency_references(self._states[key], action)},
             )
-            try:
-                self._runner.initiate(*key, copy.deepcopy(self._states[key]["actions"][action_id]))
-            except Exception as error:
-                if self._unavailable or self._closed:
-                    raise
-                LOGGER.exception("Could not initiate action %s for %s/%s", action_id, *key)
-                if self._states[key]["actions"][action_id]["status"] != "completed":
-                    self._commit_completion(
-                        key,
-                        {
-                            "request_id": f"engine:failure:{action_id}",
-                            "action_id": action_id,
-                            "type": "completed",
-                            "outcome": "failed",
-                            "result": None,
-                            "error": f"Action initiation failed: {error}",
-                        },
-                    )
+            self._initiate(key, action_id)
+
+    def _initiate(self, key, action_id):
+        try:
+            self._runner.initiate(*key, copy.deepcopy(self._states[key]["actions"][action_id]))
+        except Exception as error:
+            if self._unavailable or self._closed:
+                raise
+            LOGGER.exception("Could not initiate action %s for %s/%s", action_id, *key)
+            if self._states[key]["actions"][action_id]["status"] != "completed":
+                self._commit_completion(
+                    key,
+                    {
+                        "request_id": f"engine:failure:{action_id}",
+                        "action_id": action_id,
+                        "type": "completed",
+                        "outcome": "failed",
+                        "result": None,
+                        "error": f"Action initiation failed: {error}",
+                    },
+                )
+
+    def _execute_sync(self, key, action):
+        from .runner import action_configuration
+
+        def execute(_):
+            raise RuntimeError("Synchronous handlers cannot launch external commands.")
+
+        try:
+            config = action_configuration(self, key, action)
+            result = run_action(config, execute, Path(config["job_path"]) / "output.log")
+            # Reject malformed results before appending a completion event.
+            canonical_json(result)
+            return {"outcome": "succeeded", "result": result, "error": None}
+        except Exception as error:
+            return {"outcome": "failed", "result": None, "error": str(error)}
 
     def _commit_completion(self, key, request):
         self._check_available()
@@ -292,7 +332,7 @@ class Engine:
             raise EngineError(
                 "Action is already completed.", status=409, code="action_already_completed"
             )
-        if action["status"] != "started":
+        if action["status"] != "started" and action["mode"] != "sync":
             raise EngineError(
                 "Action has not been initiated by the server.",
                 status=409,
@@ -305,7 +345,11 @@ class Engine:
             "completed",
             request["action_id"],
             {
-                "dependency_actions": copy.deepcopy(action["dependency_actions"]),
+                "dependency_actions": (
+                    dependency_references(self._states[key], action)
+                    if action["status"] == "waiting"
+                    else copy.deepcopy(action["dependency_actions"])
+                ),
                 **{name: request[name] for name in ("outcome", "result", "error")},
             },
         )
@@ -331,28 +375,38 @@ class Engine:
             if definition is None:
                 raise EngineError("Unknown predefined action.", status=404, code="action_not_found")
             action_id = str(uuid.uuid4())
-            extra = {}
+            current = self._states[key]["current_actions"].get(request["action"])
+            if current and self._states[key]["actions"][current]["status"] != "completed":
+                raise EngineError(
+                    "An invocation of this action is already active.",
+                    status=409,
+                    code="action_already_active",
+                )
+            extra = {"mode": definition["mode"]}
             if "execution_type" in definition:
                 extra["execution_type"] = definition["execution_type"]
-            if "runner" in definition:
-                from .workflow import prepare_execution
-
-                extra["execution"] = prepare_execution(definition["runner"], request["parameters"])
+            extra["execution"] = prepare_execution(definition, request["parameters"])
+            payload = {
+                "action": request["action"],
+                "parameters": request["parameters"],
+                "dependencies": copy.deepcopy(definition["dependencies"]),
+                **extra,
+            }
+            try:
+                references = dependency_references(self._states[key], payload)
+            except EngineError as error:
+                if error.code != "dependencies_not_ready":
+                    raise
+                accepted = self._commit(key, request, "command", "waiting", action_id, payload)
             else:
-                raise EngineError("This action has no executable runner; configure runner.")
-            accepted = self._commit(
-                key,
-                request,
-                "command",
-                "waiting",
-                action_id,
-                {
-                    "action": request["action"],
-                    "parameters": request["parameters"],
-                    "dependencies": copy.deepcopy(definition["dependencies"]),
-                    **extra,
-                },
-            )
+                payload["dependency_actions"] = references
+                if definition["mode"] == "sync":
+                    action = {"action_id": action_id, "name": request["action"], **payload}
+                    payload.update(self._execute_sync(key, action))
+                    accepted = self._commit(key, request, "command", "completed", action_id, payload)
+                else:
+                    accepted = self._commit(key, request, "command", "started", action_id, payload)
+                    self._initiate(key, action_id)
             self._start_ready(key)
             return accepted
 
