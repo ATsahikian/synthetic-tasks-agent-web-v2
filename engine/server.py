@@ -56,7 +56,10 @@ class Handler(BaseHTTPRequestHandler):
     def _read_body(self):
         if self.headers.get("Transfer-Encoding"):
             raise EngineError("Transfer-Encoding is unsupported.")
-        if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+        if (
+            self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            != "application/json"
+        ):
             raise EngineError("Content-Type must be application/json.", status=415)
         length = self.headers.get("Content-Length")
         if length is None:
@@ -83,7 +86,14 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query, keep_blank_values=True)
         engine = self.server.engine
         if self.command == "GET":
-            if query and not (len(parts) == 5 and parts[:2] == ["api", "tasks"] and parts[4] == "events"):
+            is_events = len(parts) == 5 and parts[:2] == ["api", "tasks"] and parts[4] == "events"
+            is_output = (
+                len(parts) == 7
+                and parts[:2] == ["api", "tasks"]
+                and parts[4] == "actions"
+                and parts[6] == "output"
+            )
+            if query and not (is_events or is_output):
                 raise EngineError("Unexpected query parameters.")
             if parts == ["health"]:
                 return 200, engine.health()
@@ -91,6 +101,13 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, engine.list_actions()
             if parts == ["api", "tasks"]:
                 return 200, engine.list_tasks()
+            if is_output:
+                if set(query) - {"after"} or len(query.get("after", ["0"])) != 1:
+                    raise EngineError("Expected at most one after query parameter.")
+                after = query.get("after", ["0"])[0]
+                if not after.isascii() or not after.isdecimal():
+                    raise EngineError("after must be a nonnegative byte offset.")
+                return 200, engine.output(parts[2], parts[3], parts[5], after=int(after))
             if len(parts) == 5 and parts[:2] == ["api", "tasks"]:
                 task_set, task = parts[2:4]
                 if parts[4] == "state":
@@ -106,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ValueError as error:
                         raise EngineError("Invalid after sequence.") from error
                     return 200, engine.events(task_set, task, after=after)
-                if parts[4] in ("commands", "completions"):
+                if parts[4] in ("commands", "completions", "cancellations"):
                     raise EngineError("Use POST for this endpoint.", status=405)
         elif self.command == "POST":
             if query:
@@ -116,9 +133,12 @@ class Handler(BaseHTTPRequestHandler):
                     return 201, engine.command(parts[2], parts[3], self._read_body())
                 if parts[4] == "completions":
                     return 200, engine.complete(parts[2], parts[3], self._read_body())
+                if parts[4] == "cancellations":
+                    return 200, engine.cancel(parts[2], parts[3], self._read_body())
                 if parts[4] == "events":
                     raise EngineError(
-                        "Events are server-owned. Send completion signals to /completions.", status=405
+                        "Events are server-owned. Send completion signals to /completions.",
+                        status=405,
                     )
                 if parts[4] == "state":
                     raise EngineError("Use GET for state.", status=405)
@@ -136,10 +156,14 @@ class Handler(BaseHTTPRequestHandler):
                 status = error.status
                 value = {"error": {"code": error.code, "message": str(error)}}
             except (socket.timeout, TimeoutError):
-                status, value = 408, {"error": {"code": "request_timeout", "message": "Request timed out."}}
+                status, value = 408, {
+                    "error": {"code": "request_timeout", "message": "Request timed out."}
+                }
             except Exception:
                 LOGGER.exception("Unexpected API error")
-                status, value = 500, {"error": {"code": "internal_error", "message": "Internal server error."}}
+                status, value = 500, {
+                    "error": {"code": "internal_error", "message": "Internal server error."}
+                }
             self._json_response(status, value)
         except (BrokenPipeError, ConnectionResetError, socket.timeout):
             # A lost response is safe to retry with the original request ID.
@@ -158,6 +182,11 @@ def main(argv=None):
     parser.add_argument("--actions-file", type=Path, help="Predefined action configuration.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4181)
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Log initiation and accept external completion signals instead of executing workers.",
+    )
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     engine = None
@@ -166,10 +195,15 @@ def main(argv=None):
         engine = Engine(
             arguments.tasks_root,
             actions_file=arguments.actions_file,
+            execute=not arguments.manual,
         )
         server = EngineHTTPServer((arguments.host, arguments.port), engine)
         LOGGER.info("Listening on http://%s:%s", *server.server_address[:2])
-        LOGGER.info("Task root: %s; discovered tasks: %s", arguments.tasks_root.resolve(), engine.health()["tasks"])
+        LOGGER.info(
+            "Task root: %s; discovered tasks: %s",
+            arguments.tasks_root.resolve(),
+            engine.health()["tasks"],
+        )
         try:
             server.serve_forever(poll_interval=0.2)
         except KeyboardInterrupt:

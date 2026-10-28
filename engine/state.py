@@ -28,14 +28,11 @@ def dependency_references(state, action):
     for name in action["dependencies"]:
         action_id = state["current_actions"].get(name)
         dependency = state["actions"].get(action_id)
-        if (
-            dependency is None
-            or dependency["outcome"] != "succeeded"
-            or dependency["stale"]
-        ):
+        if dependency is None or dependency["outcome"] != "succeeded" or dependency["stale"]:
             raise EngineError(
                 f"Action is blocked by dependency {name}.",
-                status=409, code="dependencies_not_ready",
+                status=409,
+                code="dependencies_not_ready",
             )
         references[name] = action_id
     return references
@@ -69,14 +66,10 @@ def refresh_derived_state(state):
             continue
         for name in action["dependencies"]:
             dependency = actions.get(state["current_actions"].get(name))
-            if (
-                dependency is None
-                or dependency["outcome"] != "succeeded"
-                or dependency["stale"]
-            ):
+            if dependency is None or dependency["outcome"] != "succeeded" or dependency["stale"]:
                 action["blocked_by"].append(name)
         action["waiting_reason"] = "dependencies" if action["blocked_by"] else "ready"
-        if not action["blocked_by"]:
+        if action["waiting_reason"] == "ready":
             state["ready_action_ids"].append(action_id)
 
 
@@ -88,6 +81,8 @@ def request_from_event(event):
             "action": payload["action"],
             "parameters": payload["parameters"],
         }
+    if event["type"] == "cancel_requested":
+        return "cancel", {"request_id": event["request_id"], "action_id": event["action_id"]}
     body = {
         "request_id": event["request_id"],
         "action_id": event["action_id"],
@@ -103,8 +98,15 @@ def request_from_event(event):
 
 def validate_event(event, revision):
     required = {
-        "schema_version", "sequence", "event_id", "request_id", "request_fingerprint",
-        "action_id", "timestamp", "type", "payload",
+        "schema_version",
+        "sequence",
+        "event_id",
+        "request_id",
+        "request_fingerprint",
+        "action_id",
+        "timestamp",
+        "type",
+        "payload",
     }
     if not isinstance(event, dict) or set(event) != required:
         raise EngineError("Event has an invalid envelope.")
@@ -121,22 +123,27 @@ def validate_event(event, revision):
                 raise ValueError("Noncanonical UUID")
         except ValueError as error:
             raise EngineError(f"Invalid {field}.") from error
-    if (
-        not isinstance(event["timestamp"], str)
-        or not event["timestamp"].endswith("Z")
-    ):
+    if not isinstance(event["timestamp"], str) or not event["timestamp"].endswith("Z"):
         raise EngineError("Invalid event timestamp.")
     try:
         datetime.fromisoformat(event["timestamp"])
     except ValueError as error:
         raise EngineError("Invalid event timestamp.") from error
-    if event["type"] not in ("waiting", "started", "completed"):
+    if event["type"] not in ("waiting", "started", "completed", "cancel_requested"):
         raise EngineError("Unknown event type.")
     payload = event["payload"]
     if not isinstance(payload, dict):
         raise EngineError("Event payload must be an object.")
     if event["type"] == "waiting":
-        if set(payload) != {"action", "parameters", "dependencies"}:
+        if not {"action", "parameters", "dependencies"}.issubset(payload) or set(payload) - {
+            "action",
+            "parameters",
+            "dependencies",
+            "execution",
+            "execution_type",
+            "resources",  # Ignored when replaying older event history.
+            "invalidated_by",  # Ignored when replaying older event history.
+        }:
             raise EngineError("Invalid waiting payload.")
         validate_name(payload["action"])
         if not isinstance(payload["parameters"], dict):
@@ -148,6 +155,13 @@ def validate_event(event, revision):
             validate_name(dependency)
         if len(set(dependencies)) != len(dependencies) or payload["action"] in dependencies:
             raise EngineError("Invalid action dependencies.")
+        if "execution" in payload and not isinstance(payload["execution"], dict):
+            raise EngineError("Invalid execution specification.")
+        if payload.get("execution_type", "script") not in ("script", "agent"):
+            raise EngineError("Invalid execution type.")
+    elif event["type"] == "cancel_requested":
+        if payload:
+            raise EngineError("Invalid cancellation payload.")
     else:
         expected = {"dependency_actions"}
         if event["type"] == "completed":
@@ -158,9 +172,8 @@ def validate_event(event, revision):
                 raise EngineError("Completion error must be a string or null.")
         if set(payload) != expected or not isinstance(payload["dependency_actions"], dict):
             raise EngineError("Invalid execution payload.")
-    if (
-        not isinstance(event["request_fingerprint"], str)
-        or not re.fullmatch(r"[0-9a-f]{64}", event["request_fingerprint"])
+    if not isinstance(event["request_fingerprint"], str) or not re.fullmatch(
+        r"[0-9a-f]{64}", event["request_fingerprint"]
     ):
         raise EngineError("Invalid request fingerprint.")
     operation, request = request_from_event(event)
@@ -181,7 +194,8 @@ def reduce_event(state, event):
         if current_id and state["actions"][current_id]["status"] != "completed":
             raise EngineError(
                 "An invocation of this action is already active.",
-                status=409, code="action_already_active",
+                status=409,
+                code="action_already_active",
             )
         state["actions"][action_id] = {
             "action_id": action_id,
@@ -198,6 +212,9 @@ def reduce_event(state, event):
             "completed_at": None,
             "requested_sequence": event["sequence"],
             "completed_sequence": None,
+            "execution": payload.get("execution"),
+            "execution_type": payload.get("execution_type"),
+            "cancel_requested": False,
         }
         state["current_actions"][payload["action"]] = action_id
     else:
@@ -208,6 +225,20 @@ def reduce_event(state, event):
             raise EngineError(
                 "Action is already completed.", status=409, code="action_already_completed"
             )
+        if event["type"] == "cancel_requested":
+            action["cancel_requested"] = True
+            if action["status"] == "waiting":
+                action.update(
+                    {
+                        "status": "completed",
+                        "outcome": "cancelled",
+                        "completed_at": event["timestamp"],
+                        "completed_sequence": event["sequence"],
+                    }
+                )
+            state["revision"] = event["sequence"]
+            refresh_derived_state(state)
+            return state
         if event["type"] == "started" and action["status"] != "waiting":
             raise EngineError(
                 "Action is already started.", status=409, code="action_already_started"
@@ -224,14 +255,16 @@ def reduce_event(state, event):
             action["status"] = "started"
             action["started_at"] = event["timestamp"]
         else:
-            action.update({
-                "status": "completed",
-                "outcome": payload["outcome"],
-                "result": payload["result"],
-                "error": payload["error"],
-                "completed_at": event["timestamp"],
-                "completed_sequence": event["sequence"],
-            })
+            action.update(
+                {
+                    "status": "completed",
+                    "outcome": payload["outcome"],
+                    "result": payload["result"],
+                    "error": payload["error"],
+                    "completed_at": event["timestamp"],
+                    "completed_sequence": event["sequence"],
+                }
+            )
             if payload["outcome"] == "succeeded":
                 state["latest_successful_actions"][action["name"]] = action_id
     state["revision"] = event["sequence"]

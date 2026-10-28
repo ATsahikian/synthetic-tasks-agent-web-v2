@@ -1,8 +1,99 @@
 {
   "schema_version": 1,
   "actions": {
-    "prepare": {"dependencies": []},
-    "process": {"dependencies": ["prepare"]},
-    "summarize": {"dependencies": ["process"]}
+    "redesign": {
+      "label": "Redesign",
+      "description": "Revise one task design from the current template and author notes.",
+      "dependencies": [],
+      "execution_type": "agent",
+      "runner": {
+        "builtin": "redesign"
+      }
+    },
+    "commit-desing": {
+      "label": "Commit design",
+      "description": "Record approval of the exact design and template contents.",
+      "dependencies": [
+        "redesign"
+      ],
+      "execution_type": "script",
+      "runner": {
+        "builtin": "commit-desing"
+      }
+    },
+    "implement": {
+      "label": "Implementation + oracle",
+      "description": "Implement one approved task and repair its oracle until it passes.",
+      "dependencies": [
+        "commit-desing"
+      ],
+      "execution_type": "agent",
+      "runner": {
+        "builtin": "implement"
+      }
+    },
+    "commit-impl": {
+      "label": "Commit implementation",
+      "description": "Record approval of the successful implementation and its passing oracle.",
+      "dependencies": [
+        "implement"
+      ],
+      "execution_type": "script",
+      "runner": {
+        "builtin": "commit-impl"
+      }
+    },
+    "local_bench": {
+      "label": "Local benchmark",
+      "description": "Run Codimango trials and retain their measured results.",
+      "dependencies": [
+        "commit-impl"
+      ],
+      "execution_type": "script",
+      "runner": {
+        "builtin": "local_bench"
+      }
+    },
+    "local_bench_analyze": {
+      "label": "Local benchmark analysis",
+      "description": "Analyze all saved trials from the current local benchmark.",
+      "dependencies": [
+        "local_bench"
+      ],
+      "execution_type": "agent",
+      "runner": {
+        "builtin": "local_bench_analyze"
+      }
+    },
+    "export_to_codimango": {
+      "label": "Export to Codimango",
+      "description": "Copy the implemented task into Cyber Bench, commit it, and push to main.",
+      "dependencies": [
+        "implement"
+      ],
+      "execution_type": "script",
+      "runner": {
+        "builtin": "export_to_codimango",
+        "repo_path": "/home/atsagikyan/AAI/cyber-bench-atsagikyan"
+      }
+    },
+    "custom": {
+      "label": "Custom command",
+      "description": "Apply an explicit agent prompt to one selected task.",
+      "dependencies": [],
+      "execution_type": "agent",
+      "runner": {
+        "builtin": "custom"
+      }
+    },
+    "troubleshoot": {
+      "label": "Troubleshoot",
+      "description": "Diagnose a supplied Codimango evidence snapshot without remote mutations.",
+      "dependencies": [],
+      "execution_type": "agent",
+      "runner": {
+        "builtin": "troubleshoot"
+      }
+    }
   }
 }

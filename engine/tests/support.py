@@ -1,10 +1,37 @@
 import json
+import subprocess
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 
 from engine.core import ENGINE_DIRECTORY, Engine
+
+
+def git(directory, *arguments):
+    return subprocess.run(
+        ["git", "-C", str(directory), *arguments], check=True,
+        capture_output=True, text=True, timeout=15,
+    ).stdout.strip()
+
+
+def export_repository(base):
+    remote, checkout = base / "remote.git", base / "cyber-bench"
+    remote.mkdir()
+    checkout.mkdir()
+    git(remote, "init", "--bare", "--initial-branch=main")
+    git(checkout, "init", "--initial-branch=main")
+    git(checkout, "config", "user.name", "Engine fixture")
+    git(checkout, "config", "user.email", "engine@example.test")
+    hooks = base / "hooks"
+    hooks.mkdir()
+    git(checkout, "config", "core.hooksPath", str(hooks))
+    (checkout / "README.md").write_text("Fixture Cyber Bench repository\n")
+    git(checkout, "add", "--", "README.md")
+    git(checkout, "commit", "--no-gpg-sign", "-m", "[Infra] Initial fixture")
+    git(checkout, "remote", "add", "origin", str(remote))
+    git(checkout, "push", "origin", "HEAD:refs/heads/main")
+    return checkout, remote
 
 
 class EngineFixture(unittest.TestCase):
@@ -16,7 +43,13 @@ class EngineFixture(unittest.TestCase):
         self.root = self.base / "tasks"
         self.root.mkdir()
         self.config = self.base / "actions.json"
-        self.config.write_text((ENGINE_DIRECTORY / "actions.json").read_text("utf-8"), "utf-8")
+        self.set_actions(
+            {
+                "prepare": {"dependencies": []},
+                "process": {"dependencies": ["prepare"]},
+                "summarize": {"dependencies": ["process"]},
+            }
+        )
         self.task_directory = self.root / "set-one" / "task-one"
         self.review = self.task_directory / ".review"
         self.set_review = self.task_directory.parent / ".review"

@@ -12,7 +12,8 @@ completion signals in a later milestone.
 
 ## Run
 
-Python 3.12 on Linux is sufficient. There are no external dependencies.
+Python 3.12 on Linux is required. There are no third-party Python dependencies.
+Exports also require Git.
 
 ~~~bash
 cd synthetic-tasks-agent-web-v2/engine
@@ -71,9 +72,14 @@ Discovery runs at startup, so restart after adding or removing task folders.
 ## Actions and event semantics
 
 Edit actions.json to define the available action names and their dependencies.
-The included demonstration graph is prepare → process → summarize. Definitions
-must refer to known actions and cannot contain cycles. Changes take effect on
-restart and apply to newly accepted commands. Accepted commands retain their
+The local workflow is redesign → commit-desing → implement → commit-impl →
+local_bench → local_bench_analyze. export_to_codimango depends directly on
+implement. custom and troubleshoot are independent actions.
+commit-impl records approval of an implementation with a passing oracle; the local
+benchmark consumes that approved implementation result.
+actions.demo.json provides the demonstration graph prepare → process → summarize.
+Dependencies must refer to known actions and cannot contain cycles. Changes take
+effect on restart and apply to newly accepted commands. Accepted commands retain their
 original parameters and dependency definitions in their events.
 
 Every new command creates a distinct action ID and records a waiting event.
@@ -93,8 +99,9 @@ any queued commands whose dependencies are now satisfied.
 - At initiation, the engine captures the exact prerequisite action IDs consumed.
   Running actions retain those references.
 - New successful prerequisite executions make old dependent results stale,
-  including transitive dependents. Results remain in history. Submit explicit
-  commands to replace them.
+  including transitive dependents. Staleness is derived from the captured
+  dependency references; no separate invalidation rules are needed. Results
+  remain in history. Submit explicit commands to replace them.
 - A pending or failed prerequisite replacement blocks new consumers. Its prior
   successful result remains available in history.
 
@@ -104,6 +111,42 @@ and captured prerequisite IDs. It must initiate work and return promptly;
 completion is a separate signal. If initiation raises an exception, the server
 records a failed completion. The default hook only logs initiation. Resource
 locking for real parallel jobs belongs to the future execution layer.
+
+## Export to Codimango
+
+export_to_codimango is a script action that depends only on implement. It
+copies the task into the Cyber Bench checkout, commits its files, and pushes to
+origin/main. Codimango picks up the pushed changes automatically.
+
+Set the destination in actions.json:
+
+~~~json
+"runner": {
+  "builtin": "export_to_codimango",
+  "repo_path": "/home/atsagikyan/AAI/cyber-bench-atsagikyan"
+}
+~~~
+
+Relative paths are resolved from the actions file. The included path selects the
+sibling cyber-bench-atsagikyan checkout. CODIMANGO_REPO_ROOT can override it when
+starting the server. The resolved path is captured when a command is accepted.
+The checkout must have main checked out and an origin remote with a main branch.
+
+The destination folder uses the leaf name declared in task.toml's [task].name.
+Copies omit .review, .remote, .git, __pycache__, design.md, design-status.json,
+and symlinks. An existing task is replaced only when its destination files are
+clean. Commits include only that task; unrelated staged files remain staged.
+Cyber Bench's .claude/scripts/home-git-push helper is used when present. Other
+checkouts use a direct push to origin/main and reject unrelated unpublished
+commits. A failed push leaves the task commit local for an explicit retry.
+An unchanged task already on origin/main succeeds without another push.
+
+~~~bash
+python3 -m engine.cli run set-one task-one export_to_codimango --wait
+~~~
+
+The CLI's auto-iterate workflow also submits an export command. Export can start
+as soon as implementation succeeds with a passing oracle.
 
 ## REST API
 
@@ -251,7 +294,7 @@ mutations until restart. Retry the original request ID after replay.
 
 This restores orchestration state. Task files, execution artifacts, process
 launching, PIDs, process groups, action output logs, automatic retries,
-filesystem watching, and execution resource locks are future milestones.
+and filesystem watching are future milestones.
 If the server stops after persisting a start but before calling the initiation
 hook, restart preserves the started state. A future runner must reconcile this
 boundary with its execution records before attempting a launch again.

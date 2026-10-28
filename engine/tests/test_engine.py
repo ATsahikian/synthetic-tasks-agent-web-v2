@@ -357,6 +357,28 @@ class EngineTests(EngineFixture):
         job.write_text("broken snapshot", "utf-8")
         self.assertEqual(self.make_engine().state("set-one", "task-one"), state)
 
+    def test_legacy_invalidation_metadata_is_ignored_during_replay(self):
+        engine = self.make_engine()
+        self.complete_action(engine, "prepare")
+        process = self.complete_action(engine, "process")
+        summarize = self.complete_action(engine, "summarize")
+        state = engine.state("set-one", "task-one")
+        engine.close()
+
+        log = self.review / "events.jsonl"
+        events = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+        for event in events:
+            if event["type"] == "waiting" and event["action_id"] == process:
+                event["payload"]["invalidated_by"] = ["summarize"]
+        log.write_text("".join(json.dumps(event) + "\n" for event in events), "utf-8")
+
+        restored = self.make_engine()
+        self.assertEqual(restored.state("set-one", "task-one"), state)
+        self.complete_action(restored, "prepare")
+        updated = restored.state("set-one", "task-one")
+        self.assertTrue(updated["actions"][process]["stale"])
+        self.assertTrue(updated["actions"][summarize]["stale"])
+
     def test_task_without_markers_retains_history_in_its_review_folder(self):
         engine = self.make_engine()
         original = self.command(engine, "prepare", request_id="persisted")
@@ -526,6 +548,8 @@ class EngineTests(EngineFixture):
             {"prepare": {"dependencies": ["missing"]}},
             {"prepare": {"dependencies": ["process"]}, "process": {"dependencies": ["prepare"]}},
             {"prepare": {"dependencies": ["process", "process"]}, "process": {"dependencies": []}},
+            {"prepare": {"dependencies": [], "invalidated_by": ["process"]},
+             "process": {"dependencies": []}},
         ):
             self.set_actions(actions)
             with self.assertRaises(EngineError):
