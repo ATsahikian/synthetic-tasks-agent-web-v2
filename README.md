@@ -2,9 +2,10 @@
 
 Repository: https://github.com/ATsahikian/synthetic-tasks-agent-web-v2
 
-The second version of the synthetic task agent application. The current
-milestone provides a Python task event engine with a REST API, action
-dependencies, durable event history, and restart recovery.
+This application provides a Python task event engine with a REST API, action
+dependencies, detached workers, durable job files and event history, and restart
+recovery. Clients submit commands and cancellations; workers save completion
+results in result.json for the engine to consume.
 
 ## Project layout
 

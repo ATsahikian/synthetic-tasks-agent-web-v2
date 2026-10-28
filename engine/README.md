@@ -1,14 +1,11 @@
 # Python task event engine
 
-This first milestone discovers task folders and accepts action commands through
-REST. When dependencies are ready, the Python server stores a start event,
-initiates the action, and waits for a completion signal. The server owns event
-creation; clients submit commands and completion signals.
-
-The demonstration actions use an initiation hook that logs the action without
-launching a process. Send completion signals through REST to exercise dependency
-handling. A job runner will plug into the server's initiation hook and send those
-completion signals in a later milestone.
+The engine discovers task folders and accepts action commands through REST.
+When dependencies are ready, the server stores a start event and launches a
+detached worker. The runner and worker communicate through durable job files:
+input.json describes the action, output.log captures its output, cancel.json
+requests cancellation, and result.json records completion. The runner reads
+results and creates completion events; clients submit commands and cancellations.
 
 ## Run
 
@@ -77,7 +74,8 @@ local_bench → local_bench_analyze. export_to_codimango depends directly on
 implement. custom and troubleshoot are independent actions.
 commit-impl records approval of an implementation with a passing oracle; the local
 benchmark consumes that approved implementation result.
-actions.demo.json provides the demonstration graph prepare → process → summarize.
+actions.demo.json provides an executable demonstration graph
+prepare → process → summarize.
 Dependencies must refer to known actions and cannot contain cycles. Changes take
 effect on restart and apply to newly accepted commands. Accepted commands retain their
 original parameters and dependency definitions in their events.
@@ -86,13 +84,12 @@ Every new command creates a distinct action ID and records a waiting event.
 Commands with unmet prerequisites remain waiting with waiting_reason set to
 dependencies. When successful prerequisites are available, the server captures
 their action IDs, durably records a started event, and invokes the initiation hook.
-It then waits for a completion signal. Successful completion automatically starts
+It then waits for the worker's result.json. Successful completion automatically starts
 any queued commands whose dependencies are now satisfied.
 
-- Clients cannot submit start events. Every action, including a short action,
-  has a server-created start before completion.
-- A completion signal is accepted only for a started action. Its outcome is
-  succeeded, failed, cancelled, or timed_out.
+- Clients cannot submit start or completion events. Every action, including a
+  short action, has a server-created start before completion.
+- Worker completion outcomes are succeeded, failed, cancelled, or timed_out.
 - Failed prerequisites block downstream work. Submit another command to retry.
 - Different action types can be active simultaneously. Only one waiting or
   started invocation of a given action type is allowed in each task.
@@ -105,12 +102,18 @@ any queued commands whose dependencies are now satisfied.
 - A pending or failed prerequisite replacement blocks new consumers. Its prior
   successful result remains available in history.
 
-For execution integration, pass initiate_action(task_set, task, action) to Engine.
-The hook receives a copy of the started action, including its ID, parameters,
-and captured prerequisite IDs. It must initiate work and return promptly;
-completion is a separate signal. If initiation raises an exception, the server
-records a failed completion. The default hook only logs initiation. Resource
-locking for real parallel jobs belongs to the future execution layer.
+Every accepted action requires a runner definition. Configure a built-in action
+or a command with an argv array in actions.json. The command runner supports cwd,
+env, input, timeout_ms, termination_grace_ms, and success_result. Known placeholders
+such as {task_path}, {job_path}, and {parameters.prompt} are expanded in command
+values. Arguments are passed directly to the executable. Commands must exit with
+status zero; success_result can additionally require fields from a
+SYNTHETIC_RESULT={"approved":true} output marker.
+
+If a worker cannot be launched, the server records a failed completion. Each
+command runs in its own process group, with a default one-hour timeout and
+ten-second termination grace period. Workers clean up remaining group members
+after exit, cancellation, or timeout. The runner checks job results every 200 ms.
 
 ## Export to Codimango
 
@@ -158,10 +161,11 @@ as soon as implementation succeeds with a passing oracle.
 | GET | /api/tasks/{set}/{task}/state | Derived task state |
 | GET | /api/tasks/{set}/{task}/events?after=0 | Events after an exclusive sequence |
 | POST | /api/tasks/{set}/{task}/commands | Accept a predefined action |
-| POST | /api/tasks/{set}/{task}/completions | Accept a completion signal |
+| POST | /api/tasks/{set}/{task}/cancellations | Request action cancellation |
+| GET | /api/tasks/{set}/{task}/actions/{id}/output?after=0 | Read command output using a byte offset |
 
 POST requests require Content-Type: application/json and a stable request_id.
-IDs are scoped to a task and shared between its commands and completions. Reuse the
+IDs are scoped to a task and shared between its commands and cancellations. Reuse the
 same ID when retrying the same request. A new logical request needs a new ID.
 Identical retries return the original acknowledgment without writing an event;
 reusing an ID with different content returns HTTP 409. The engine: prefix is
@@ -173,27 +177,25 @@ Command:
 {"request_id":"prepare-command","action":"prepare","parameters":{"input":"demo"}}
 ~~~
 
-Completion signal:
+Cancellation:
 
 ~~~json
 {
-  "request_id": "prepare-finish",
-  "action_id": "UUID_FROM_COMMAND",
-  "outcome": "succeeded",
-  "result": {"value": 42}
+  "request_id": "prepare-cancel",
+  "action_id": "UUID_FROM_COMMAND"
 }
 ~~~
 
-For a failure, use outcome failed and an optional error string. Clients cannot
-submit waiting or start events, choose sequences, or append arbitrary events.
-The /events endpoint is read-only. Completion signals may optionally include
-type completed; any other type is rejected.
+Waiting actions are cancelled immediately. For a started action, the runner
+writes cancel.json and the worker stops its command before recording the outcome.
+Clients cannot submit events, choose sequences, or report action results.
+The /events endpoint is read-only; there is no /completions endpoint.
 The server returns action_id, event_id, sequence, and type as its acknowledgment.
 Command acknowledgments identify the original waiting event, even when the
 server has already started the action. Retrieve state separately to see its
 current status and outcome.
 
-Commands return HTTP 201; completions and reads return HTTP 200. Validation failures
+Commands return HTTP 201; cancellations and reads return HTTP 200. Validation failures
 return 400, missing tasks/actions 404, and transition or request-ID conflicts
 409. Persistence failures return 503. Errors are JSON objects:
 
@@ -201,39 +203,22 @@ return 400, missing tasks/actions 404, and transition or request-ID conflicts
 {"error":{"code":"action_not_started","message":"Action has not been initiated by the server."}}
 ~~~
 
-### Complete curl example
+### Demonstration workflow
 
-After adding set-one/task-one to the task root, run the following in another
-terminal. This queues process before prepare. The server initiates prepare,
-then automatically initiates process when prepare completes. Each action receives
-only a completion signal from this client.
+After adding set-one/task-one to the task root, start the server with
+--actions-file engine/actions.demo.json from the repository root. In another
+terminal, queue the dependent commands before their prerequisites:
 
 ~~~bash
-ENGINE_BASE=http://127.0.0.1:4181/api/tasks/set-one/task-one
-send() {
-  curl -fsS -H 'Content-Type: application/json' "$ENGINE_BASE/$1" --data "$2"
-}
-action_id() {
-  python3 -c 'import json, sys; print(json.load(sys.stdin)["action_id"])'
-}
-
-PROCESS_ID=$(send commands '{"request_id":"demo-process","action":"process"}' | action_id)
-curl -fsS "$ENGINE_BASE/state"
-
-PREPARE_ID=$(send commands '{"request_id":"demo-prepare","action":"prepare"}' | action_id)
-send completions '{"request_id":"demo-prepare-finish","action_id":"'"$PREPARE_ID"'","outcome":"succeeded"}'
-
-send completions '{"request_id":"demo-process-finish","action_id":"'"$PROCESS_ID"'","outcome":"succeeded","result":{"processed":true}}'
-
-SUMMARIZE_ID=$(send commands '{"request_id":"demo-summarize","action":"summarize"}' | action_id)
-send completions '{"request_id":"demo-summarize-finish","action_id":"'"$SUMMARIZE_ID"'","outcome":"succeeded"}'
-
-curl -fsS "$ENGINE_BASE/state"
-curl -fsS "$ENGINE_BASE/events?after=2"
+python3 -m engine.cli run set-one task-one summarize
+python3 -m engine.cli run set-one task-one process
+python3 -m engine.cli run set-one task-one prepare --wait
+python3 -m engine.cli state set-one task-one
+python3 -m engine.cli events set-one task-one
 ~~~
 
-Repeat a request with its existing ID to verify deduplication. Repeating this
-whole example also returns its original acknowledgments.
+Workers complete the actions automatically in dependency order. State and event
+reads show progress; no client completion request is needed.
 
 ## Persistence and restart recovery
 
@@ -249,7 +234,18 @@ synthetic-tasks-project-v2/
         engine.lock
         events.jsonl
         job.json
-        jobs/                   # existing v1-style artifacts, when present
+        jobs/
+          engine/
+            {action_id}/
+              input.json
+              launch.json
+              worker.lock
+              worker.json
+              process.json
+              stdin.txt
+              output.log
+              cancel.json       # only when cancellation is requested
+              result.json       # only after the worker finishes
     task-two/
       .review/
         engine.lock
@@ -279,25 +275,28 @@ Snapshot failure does not discard an already durable event.
 
 To check restoration, stop the server, optionally delete only a task's job.json,
 and run the same startup command again. State and request-ID deduplication are
-rebuilt from events. Ready commands resume initiation after replay; started
-actions continue waiting for their completion signal and are not reinitiated.
-Historical client start reports and direct completions remain replayable.
+rebuilt from events. Ready commands resume execution after replay. Started actions
+reconnect to live workers or consume results saved while the server was offline.
+If a worker is dead and has no saved result, the runner cleans up its remaining
+processes and marks the action failed. Submit a new command to retry; started
+actions are never automatically relaunched. Historical events remain replayable.
+Old starts without worker records are marked failed during recovery.
 A malformed or missing snapshot does not affect recovery.
 Tasks whose discovery markers are removed retain readable history at their
 state/events URLs as long as their directories and .review files remain.
-New commands and completions require a discovered task.
+New commands require a discovered task; stored worker results are still reconciled
+when a task's discovery markers have been removed.
 
 Startup truncates an incomplete final line. Corruption within newline-terminated
 history stops startup. Event logs must be modified only through the engine.
 If an append has an uncertain persistence result, the engine rejects further
 mutations until restart. Retry the original request ID after replay.
 
-This restores orchestration state. Task files, execution artifacts, process
-launching, PIDs, process groups, action output logs, automatic retries,
-and filesystem watching are future milestones.
-If the server stops after persisting a start but before calling the initiation
-hook, restart preserves the started state. A future runner must reconcile this
-boundary with its execution records before attempting a launch again.
+Workers are detached and continue running when the server stops. Completion
+results are written atomically, and output is synced before result.json is saved.
+The runner applies a completed result once and starts newly ready actions.
+A worker lock prevents concurrent launches in the same job directory, and an
+existing result prevents rerunning a completed job.
 
 ## Tests
 
@@ -307,9 +306,9 @@ From the parent v2 directory:
 python3 -m unittest discover -s engine/tests -v
 ~~~
 
-Tests cover discovery, REST requests, dependency transitions, parallel requests,
-deduplication, captured inputs, stale results, persistence failures, and restart
-recovery, including server-owned starts, initiation ordering, task-local storage,
-project moves, and task lock ownership. Fixtures use temporary projects outside
-the source tree and are removed on cleanup. Temporary servers are stopped and
-their listening ports are checked for release.
+Tests cover discovery, REST requests, worker execution, cancellation, timeouts,
+dependency transitions, parallel requests, deduplication, captured inputs, stale
+results, persistence failures, and restart recovery, including server-owned
+starts, launch ordering, task-local storage, project moves, and task lock ownership.
+Fixtures use temporary projects outside the source tree and are removed on cleanup.
+Temporary servers are stopped and their listening ports are checked for release.

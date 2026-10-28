@@ -151,11 +151,10 @@ class ActionRunner:
     def recover(self):
         for key, state in list(self.engine._states.items()):
             for action in list(state["actions"].values()):
-                if action["status"] == "started" and action.get("execution"):
+                if action["status"] == "started":
                     completion = self._completion(key, action)
                     if completion is not None:
                         self._apply(key, action["action_id"], completion)
-        # Historic manual starts have no execution record and still await a signal.
 
     def _apply(self, key, action_id, result):
         action = self.engine._states[key]["actions"][action_id]
@@ -182,7 +181,7 @@ class ActionRunner:
                         continue
                     for key, state in list(self.engine._states.items()):
                         for action in list(state["actions"].values()):
-                            if action["status"] != "started" or not action.get("execution"):
+                            if action["status"] != "started":
                                 continue
                             completion = self._completion(key, action)
                             if completion is not None:

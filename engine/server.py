@@ -123,7 +123,7 @@ class Handler(BaseHTTPRequestHandler):
                     except ValueError as error:
                         raise EngineError("Invalid after sequence.") from error
                     return 200, engine.events(task_set, task, after=after)
-                if parts[4] in ("commands", "completions", "cancellations"):
+                if parts[4] in ("commands", "cancellations"):
                     raise EngineError("Use POST for this endpoint.", status=405)
         elif self.command == "POST":
             if query:
@@ -131,13 +131,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[:2] == ["api", "tasks"]:
                 if parts[4] == "commands":
                     return 201, engine.command(parts[2], parts[3], self._read_body())
-                if parts[4] == "completions":
-                    return 200, engine.complete(parts[2], parts[3], self._read_body())
                 if parts[4] == "cancellations":
                     return 200, engine.cancel(parts[2], parts[3], self._read_body())
                 if parts[4] == "events":
                     raise EngineError(
-                        "Events are server-owned. Send completion signals to /completions.",
+                        "Events are server-owned and read-only.",
                         status=405,
                     )
                 if parts[4] == "state":
@@ -182,11 +180,6 @@ def main(argv=None):
     parser.add_argument("--actions-file", type=Path, help="Predefined action configuration.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4181)
-    parser.add_argument(
-        "--manual",
-        action="store_true",
-        help="Log initiation and accept external completion signals instead of executing workers.",
-    )
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     engine = None
@@ -195,7 +188,6 @@ def main(argv=None):
         engine = Engine(
             arguments.tasks_root,
             actions_file=arguments.actions_file,
-            execute=not arguments.manual,
         )
         server = EngineHTTPServer((arguments.host, arguments.port), engine)
         LOGGER.info("Listening on http://%s:%s", *server.server_address[:2])

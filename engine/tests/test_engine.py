@@ -72,19 +72,19 @@ class EngineTests(EngineFixture):
         state = engine.state("set-one", "task-one")
         self.assertEqual(state["actions"][process]["blocked_by"], ["prepare"])
         with self.assertRaises(EngineError) as caught:
-            self.report(engine, process, "completed")
+            self.finish(engine, process)
         self.assertEqual(caught.exception.code, "action_not_started")
         prepare = self.command(engine, "prepare")["action_id"]
         self.assertEqual(engine.state("set-one", "task-one")["actions"][prepare]["status"], "started")
-        self.report(engine, prepare, "completed", result={"prepared": True})
+        self.finish(engine, prepare, result={"prepared": True})
         self.assertEqual(engine.state("set-one", "task-one")["actions"][process]["status"], "started")
-        self.report(engine, process, "completed", outcome="failed", error="Demo failure")
+        self.finish(engine, process, outcome="failed", error="Demo failure")
         state = engine.state("set-one", "task-one")
         self.assertEqual(state["actions"][summarize]["waiting_reason"], "dependencies")
         self.assertEqual(state["actions"][process]["error"], "Demo failure")
         replacement = self.command(engine, "process")["action_id"]
-        self.report(engine, replacement, "completed")
-        self.report(engine, summarize, "completed")
+        self.finish(engine, replacement)
+        self.finish(engine, summarize)
         state = engine.state("set-one", "task-one")
         self.assertEqual(state["actions"][summarize]["outcome"], "succeeded")
         self.assertIsNotNone(state["actions"][replacement]["started_at"])
@@ -99,34 +99,28 @@ class EngineTests(EngineFixture):
         with self.assertRaises(EngineError) as caught:
             self.command(engine, "prepare", request_id="command-one", parameters={"different": True})
         self.assertEqual(caught.exception.code, "request_id_conflict")
-        finished = self.report(engine, original["action_id"], "completed", request_id="finish-one")
+        finished = self.finish(engine, original["action_id"])
         self.assertEqual(
             finished,
-            self.report(engine, original["action_id"], "completed", request_id="finish-one"),
+            self.finish(engine, original["action_id"]),
         )
         replacement = self.command(engine, "prepare")["action_id"]
-        with self.assertRaises(EngineError):
-            self.report(engine, original["action_id"], "completed", request_id="late-result")
+        revision = engine.state("set-one", "task-one")["revision"]
+        self.assertEqual(finished, self.finish(engine, original["action_id"]))
         state = engine.state("set-one", "task-one")
+        self.assertEqual(state["revision"], revision)
         self.assertEqual(state["current_actions"]["prepare"], replacement)
         self.assertEqual(state["actions"][replacement]["status"], "started")
         with self.assertRaises(EngineError) as caught:
-            self.command(engine, "process", request_id="finish-one")
-        self.assertEqual(caught.exception.code, "request_id_conflict")
+            self.command(engine, "process", request_id=f"engine:completion:{original['action_id']}")
+        self.assertIn("reserved engine: prefix", str(caught.exception))
 
-    def test_same_action_type_cannot_overlap_and_clients_cannot_start(self):
+    def test_same_action_type_cannot_overlap(self):
         engine = self.make_engine()
-        prepare = self.command(engine, "prepare")["action_id"]
+        self.command(engine, "prepare")
         with self.assertRaises(EngineError) as caught:
             self.command(engine, "prepare")
         self.assertEqual(caught.exception.code, "action_already_active")
-        with self.assertRaises(EngineError) as caught:
-            engine.complete("set-one", "task-one", {
-                "request_id": "client-start", "action_id": prepare,
-                "type": "started", "outcome": "succeeded",
-            })
-        self.assertEqual(caught.exception.status, 400)
-        self.assertIn("server owns action starts", str(caught.exception))
         self.assertEqual(engine.state("set-one", "task-one")["revision"], 2)
 
     def test_results_are_preserved_and_staleness_is_transitive(self):
@@ -147,7 +141,7 @@ class EngineTests(EngineFixture):
             "dependencies",
         )
         second_process = self.complete_action(engine, "process")
-        self.report(engine, second_summarize, "completed")
+        self.finish(engine, second_summarize)
         state = engine.state("set-one", "task-one")
         self.assertEqual(state["actions"][second_summarize]["dependency_actions"], {"process": second_process})
         self.assertFalse(state["actions"][second_summarize]["stale"])
@@ -158,7 +152,7 @@ class EngineTests(EngineFixture):
         first_prepare = self.complete_action(engine, "prepare")
         process = self.command(engine, "process")["action_id"]
         self.complete_action(engine, "prepare")
-        self.report(engine, process, "completed")
+        self.finish(engine, process)
         action = engine.state("set-one", "task-one")["actions"][process]
         self.assertEqual(action["dependency_actions"], {"prepare": first_prepare})
         self.assertTrue(action["stale"])
@@ -168,7 +162,7 @@ class EngineTests(EngineFixture):
         first_prepare = self.complete_action(engine, "prepare")
         first_process = self.complete_action(engine, "process")
         replacement = self.command(engine, "prepare")["action_id"]
-        self.report(engine, replacement, "completed", outcome="timed_out")
+        self.finish(engine, replacement, outcome="timed_out")
         next_process = self.command(engine, "process")["action_id"]
         state = engine.state("set-one", "task-one")
         self.assertEqual(state["latest_successful_actions"]["prepare"], first_prepare)
@@ -181,7 +175,7 @@ class EngineTests(EngineFixture):
         with ThreadPoolExecutor(max_workers=12) as pool:
             commands = list(pool.map(lambda index: self.command(engine, f"action_{index}"), range(12)))
             completions = list(pool.map(
-                lambda acknowledgment: self.report(engine, acknowledgment["action_id"], "completed"),
+                lambda acknowledgment: self.finish(engine, acknowledgment["action_id"]),
                 commands,
             ))
         self.assertEqual(sorted(item["sequence"] for item in commands), list(range(1, 25, 2)))
@@ -213,7 +207,7 @@ class EngineTests(EngineFixture):
             calls.append(action["action_id"])
             action["parameters"]["input"] = 99
 
-        engine = self.make_engine(initiate_action=initiate)
+        engine = self.make_engine(initiate=initiate)
         original = self.command(engine, "prepare", request_id="initiate-once", parameters={"input": 7})
         self.assertEqual(calls, [original["action_id"]])
         self.assertEqual(
@@ -224,13 +218,13 @@ class EngineTests(EngineFixture):
             self.command(engine, "prepare", request_id="initiate-once", parameters={"input": 7}), original,
         )
         engine.close()
-        restored = self.make_engine(initiate_action=initiate)
+        restored = self.make_engine(initiate=initiate)
         self.assertEqual(calls, [original["action_id"]])
-        self.report(restored, original["action_id"], "completed")
+        self.finish(restored, original["action_id"])
 
     def test_failed_start_persistence_prevents_initiation_and_restart_resumes(self):
         initiate = mock.Mock()
-        engine = self.make_engine(initiate_action=initiate)
+        engine = self.make_engine(initiate=initiate)
         append = engine._store.append
 
         def fail_start(key, event):
@@ -245,7 +239,7 @@ class EngineTests(EngineFixture):
         self.assertEqual(caught.exception.status, 503)
         initiate.assert_not_called()
         engine.close()
-        restored = self.make_engine(initiate_action=initiate)
+        restored = self.make_engine(initiate=initiate)
         acknowledgment = self.command(restored, "prepare", request_id="recover-start")
         self.assertEqual(acknowledgment["sequence"], 1)
         initiate.assert_called_once()
@@ -254,7 +248,7 @@ class EngineTests(EngineFixture):
 
     def test_restart_starts_commands_unblocked_by_durable_completion(self):
         initiate = mock.Mock()
-        engine = self.make_engine(initiate_action=initiate)
+        engine = self.make_engine(initiate=initiate)
         process = self.command(engine, "process")["action_id"]
         prepare = self.command(engine, "prepare")["action_id"]
         append = engine._store.append
@@ -267,11 +261,11 @@ class EngineTests(EngineFixture):
         with mock.patch.object(engine._store, "append", side_effect=fail_downstream_start):
             with self.assertLogs("engine.core", level="ERROR"):
                 with self.assertRaises(EngineError):
-                    self.report(engine, prepare, "completed", request_id="durable-completion")
+                    self.finish(engine, prepare)
         self.assertEqual(initiate.call_count, 1)
         engine.close()
-        restored = self.make_engine(initiate_action=initiate)
-        completed = self.report(restored, prepare, "completed", request_id="durable-completion")
+        restored = self.make_engine(initiate=initiate)
+        completed = self.finish(restored, prepare)
         self.assertEqual(completed["sequence"], 4)
         self.assertEqual(initiate.call_count, 2)
         self.assertEqual(initiate.call_args.args[2]["action_id"], process)
@@ -279,7 +273,7 @@ class EngineTests(EngineFixture):
 
     def test_initiation_failure_records_failed_completion_and_blocks_dependents(self):
         initiate = mock.Mock(side_effect=OSError("Runner unavailable"))
-        engine = self.make_engine(initiate_action=initiate)
+        engine = self.make_engine(initiate=initiate)
         process = self.command(engine, "process")["action_id"]
         with self.assertLogs("engine.core", level="ERROR"):
             prepare = self.command(engine, "prepare", request_id="failed-launch")["action_id"]
@@ -290,24 +284,7 @@ class EngineTests(EngineFixture):
         self.command(engine, "prepare", request_id="failed-launch")
         initiate.assert_called_once()
         engine.close()
-        self.assertEqual(self.make_engine(initiate_action=initiate).state("set-one", "task-one"), state)
-
-    def test_initiation_hook_can_signal_synchronous_completion(self):
-        calls = []
-
-        def initiate(task_set, task, action):
-            calls.append(action["name"])
-            engine.complete(task_set, task, {
-                "request_id": "sync-" + action["action_id"],
-                "action_id": action["action_id"], "outcome": "succeeded",
-            })
-
-        engine = self.make_engine(initiate_action=initiate)
-        summarize = self.command(engine, "summarize")["action_id"]
-        self.command(engine, "process")
-        self.command(engine, "prepare")
-        self.assertEqual(calls, ["prepare", "process", "summarize"])
-        self.assertEqual(engine.state("set-one", "task-one")["actions"][summarize]["outcome"], "succeeded")
+        self.assertEqual(self.make_engine(initiate=initiate).state("set-one", "task-one"), state)
 
     def test_legacy_start_reports_and_direct_completions_remain_replayable(self):
         engine = self.make_engine()
@@ -330,15 +307,15 @@ class EngineTests(EngineFixture):
         state = engine.state("set-one", "task-one")
         engine.close()
         initiate = mock.Mock()
-        restored = self.make_engine(initiate_action=initiate)
+        restored = self.make_engine(initiate=initiate)
         self.assertEqual(restored.state("set-one", "task-one"), state)
         initiate.assert_not_called()
-        self.report(restored, process, "completed")
+        self.finish(restored, process)
 
     def test_restart_rebuilds_snapshots_and_original_acknowledgments(self):
         engine = self.make_engine()
         original = self.command(engine, "prepare", request_id="persisted-command", parameters={"input": 7})
-        self.report(engine, original["action_id"], "completed", result={"value": 9})
+        self.finish(engine, original["action_id"], result={"value": 9})
         process = self.command(engine, "process")["action_id"]
         state = engine.state("set-one", "task-one")
         engine.close()
@@ -508,7 +485,7 @@ class EngineTests(EngineFixture):
     def test_project_move_keeps_history_and_refreshes_workspace_metadata(self):
         engine = self.make_engine()
         original = self.command(engine, "prepare", request_id="move-project")
-        self.report(engine, original["action_id"], "completed")
+        self.finish(engine, original["action_id"])
         state = engine.state("set-one", "task-one")
         engine.close()
         moved = self.base / "moved-project"
@@ -543,6 +520,16 @@ class EngineTests(EngineFixture):
             self.make_engine()
         self.assertEqual(list(outside.iterdir()), [])
 
+    def test_command_without_runner_does_not_persist_an_event(self):
+        self.config.write_text(json.dumps({
+            "schema_version": 1, "actions": {"prepare": {"dependencies": []}},
+        }))
+        engine = self.make_engine()
+        with self.assertRaises(EngineError) as caught:
+            self.command(engine, "prepare")
+        self.assertIn("configure runner", str(caught.exception))
+        self.assertEqual(engine.state("set-one", "task-one")["revision"], 0)
+
     def test_invalid_definitions_and_request_validation(self):
         for actions in (
             {"prepare": {"dependencies": ["missing"]}},
@@ -568,5 +555,5 @@ class EngineTests(EngineFixture):
             engine.state("set-one", "../task-one")
         for outcome in ("failed", "cancelled", "timed_out"):
             action = self.command(engine, "prepare")["action_id"]
-            self.report(engine, action, "completed", outcome=outcome)
+            self.finish(engine, action, outcome=outcome)
             self.assertEqual(engine.state("set-one", "task-one")["actions"][action]["outcome"], outcome)

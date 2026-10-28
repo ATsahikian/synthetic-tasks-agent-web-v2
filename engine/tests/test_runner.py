@@ -87,7 +87,7 @@ class RunnerTests(EngineFixture):
                 "process": self.script('print("processed")', dependencies=["prepare"]),
             }
         )
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         process = self.command(engine, "process")["action_id"]
         prepare = self.command(engine, "prepare", parameters={"text": text})["action_id"]
         self.assertEqual(self.finished(engine, process)["outcome"], "succeeded")
@@ -113,7 +113,7 @@ class RunnerTests(EngineFixture):
         other = self.task_directory.with_name("task-two")
         other.mkdir()
         (other / "design.md").write_text("# Other")
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         first = self.command(engine, "one")["action_id"]
         second = self.command(engine, "two")["action_id"]
         self.assertEqual(self.finished(engine, second)["outcome"], "succeeded")
@@ -150,11 +150,11 @@ class RunnerTests(EngineFixture):
         gate, count = self.base / "release", self.base / "count"
         script = f'from pathlib import Path; import time; Path({str(count)!r}).open("a").write("launch\\n");\nwhile not Path({str(gate)!r}).exists(): time.sleep(.05)\nprint("done")'
         self.set_actions({"run": self.script(script)})
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         receipt = self.command(engine, "run", request_id="stable")
         self.wait_for(count.exists)
         engine.close()
-        restored = self.make_engine(execute=True)
+        restored = self.make_engine(workers=True)
         self.assertEqual(self.command(restored, "run", request_id="stable"), receipt)
         self.assertEqual(
             restored.state("set-one", "task-one")["actions"][receipt["action_id"]]["status"],
@@ -164,7 +164,7 @@ class RunnerTests(EngineFixture):
         gate.touch()
         directory = job_directory(self.root, ("set-one", "task-one"), receipt["action_id"])
         self.wait_for(lambda: (directory / "result.json").exists())
-        final = self.make_engine(execute=True)
+        final = self.make_engine(workers=True)
         self.assertEqual(self.finished(final, receipt["action_id"])["outcome"], "succeeded")
         self.assertEqual(count.read_text(), "launch\n")
         self.assertEqual(final.state("set-one", "task-one")["revision"], 3)
@@ -176,7 +176,7 @@ class RunnerTests(EngineFixture):
                 "process": self.script('print("old runner")', dependencies=["prepare"]),
             }
         )
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         process = self.command(engine, "process")["action_id"]
         engine.close()
         self.set_actions(
@@ -187,7 +187,7 @@ class RunnerTests(EngineFixture):
                 ),
             }
         )
-        restored = self.make_engine(execute=True)
+        restored = self.make_engine(workers=True)
         self.command(restored, "prepare")
         self.assertEqual(self.finished(restored, process)["outcome"], "succeeded")
         self.assertIn("old runner", restored.output("set-one", "task-one", process)["output"])
@@ -199,7 +199,7 @@ class RunnerTests(EngineFixture):
                 "process": self.script('print("unused")', dependencies=["prepare"]),
             }
         )
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         waiting = self.command(engine, "process")["action_id"]
         cancel = {"request_id": "cancel-wait", "action_id": waiting}
         receipt = engine.cancel("set-one", "task-one", cancel)
@@ -215,7 +215,7 @@ class RunnerTests(EngineFixture):
         self.assertEqual(self.finished(engine, running)["outcome"], "cancelled")
         self.assertFalse(group_exists(group))
         engine.close()
-        restored = self.make_engine(execute=True)
+        restored = self.make_engine(workers=True)
         self.assertEqual(
             restored.state("set-one", "task-one")["actions"][running]["outcome"], "cancelled"
         )
@@ -227,7 +227,7 @@ class RunnerTests(EngineFixture):
                 "marker": self.script('print("success")', success_result={"oracle_passed": True}),
             }
         )
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         timed = self.command(engine, "timeout")["action_id"]
         marker = self.command(engine, "marker")["action_id"]
         self.assertEqual(self.finished(engine, timed)["outcome"], "timed_out")
@@ -235,7 +235,7 @@ class RunnerTests(EngineFixture):
 
     def test_interrupted_worker_fails_without_relaunch_and_removes_child(self):
         self.set_actions({"run": self.script("import time; time.sleep(30)")})
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         running = self.command(engine, "run")["action_id"]
         directory = job_directory(self.root, ("set-one", "task-one"), running)
         self.wait_for(lambda: (directory / "process.json").exists())
@@ -245,24 +245,14 @@ class RunnerTests(EngineFixture):
         self.assertEqual(self.finished(engine, running)["outcome"], "failed")
         self.wait_for(lambda: not group_exists(group))
         engine.close()
-        restored = self.make_engine(execute=True)
+        restored = self.make_engine(workers=True)
         self.assertEqual(restored.state("set-one", "task-one")["revision"], 3)
-
-    def test_worker_owned_action_cannot_be_completed_by_a_client(self):
-        self.set_actions({"run": self.script("import time; time.sleep(30)")})
-        engine = self.make_engine(execute=True)
-        running = self.command(engine, "run")["action_id"]
-        with self.assertRaises(EngineError) as caught:
-            self.report(engine, running, "completed")
-        self.assertEqual(caught.exception.code, "worker_owned_action")
-        engine.cancel("set-one", "task-one", {"request_id": "cleanup", "action_id": running})
-        self.finished(engine, running)
 
     def test_launch_receipt_failure_stops_the_untracked_worker(self):
         from engine import runner
 
         self.set_actions({"run": self.script("import time; time.sleep(30)")})
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         write = runner.atomic_json_write
 
         def fail_receipt(file, value):
@@ -280,16 +270,16 @@ class RunnerTests(EngineFixture):
         self.set_actions(
             {"run": self.script(f"from pathlib import Path; Path({str(marker)!r}).touch()")}
         )
-        manual = self.make_engine()
-        running = self.command(manual, "run")["action_id"]
-        manual.close()
-        restored = self.make_engine(execute=True)
+        engine = self.make_engine()
+        running = self.command(engine, "run")["action_id"]
+        engine.close()
+        restored = self.make_engine(workers=True)
         self.assertEqual(self.finished(restored, running)["outcome"], "failed")
         self.assertFalse(marker.exists())
 
     def test_saved_cancel_is_reapplied_after_restart(self):
         self.set_actions({"run": self.script("import time; time.sleep(30)")})
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         running = self.command(engine, "run")["action_id"]
         directory = job_directory(self.root, ("set-one", "task-one"), running)
         self.wait_for(lambda: (directory / "process.json").exists())
@@ -301,8 +291,23 @@ class RunnerTests(EngineFixture):
                     {"request_id": "cancel-before-restart", "action_id": running},
                 )
             engine.close()
-        restored = self.make_engine(execute=True)
+        restored = self.make_engine(workers=True)
         self.assertEqual(self.finished(restored, running)["outcome"], "cancelled")
+
+    def test_restart_fails_legacy_start_without_execution(self):
+        engine = self.make_engine()
+        running = self.command(engine, "prepare")["action_id"]
+        engine.close()
+        log = self.review / "events.jsonl"
+        events = [json.loads(line) for line in log.read_text().splitlines()]
+        events[0]["payload"].pop("execution")
+        log.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+        restored = self.make_engine(workers=True)
+        action = self.finished(restored, running)
+        self.assertEqual(action["outcome"], "failed")
+        self.assertIn("Submit a new command to retry", action["error"])
+        self.assertEqual(restored.state("set-one", "task-one")["revision"], 3)
 
     def test_output_offsets_preserve_utf8_boundaries(self):
         self.set_actions({"run": self.script('print("unused")')})

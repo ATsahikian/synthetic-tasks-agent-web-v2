@@ -85,7 +85,7 @@ print('measured trials finished')
         self.addCleanup(environment.stop)
 
     def test_default_task_workflow_with_oracle_benchmark_and_analysis(self):
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         redesign = self.command(engine, "redesign", parameters={"prompt": "Revise the fixture"})[
             "action_id"
         ]
@@ -127,7 +127,7 @@ print('measured trials finished')
         self.assertFalse((self.task_directory / "design-status.json").exists())
 
     def test_changed_design_is_rejected_before_implementation(self):
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         self.command(engine, "redesign")
         approval = self.command(engine, "commit-desing")["action_id"]
         self.finished(engine, approval)
@@ -138,7 +138,7 @@ print('measured trials finished')
         self.assertIn("Design or template changed", result["error"])
 
     def test_export_runs_after_implementation_without_local_benchmark(self):
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         self.command(engine, "redesign")
         self.command(engine, "commit-desing")
         implement = self.command(engine, "implement")["action_id"]
@@ -173,7 +173,7 @@ print('measured trials finished')
                 "export_to_codimango": definitions["export_to_codimango"],
             }
         )
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         implement = self.command(engine, "implement")["action_id"]
         commit = self.command(engine, "commit-impl")["action_id"]
         benchmark = self.command(engine, "local_bench")["action_id"]
@@ -213,7 +213,7 @@ print('measured trials finished')
         self.assertEqual((self.task_directory / "notes.txt").read_text(), "Unrelated action output")
 
     def test_builtin_parameters_are_rejected_before_events(self):
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         for name, parameters in [
             ("custom", {}),
             ("custom", {"agent": {}, "prompt": "x"}),
@@ -228,7 +228,7 @@ print('measured trials finished')
         self.assertEqual(engine.state("set-one", "task-one")["revision"], 0)
 
     def test_custom_and_evidence_troubleshooting(self):
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         custom = self.command(engine, "custom", parameters={"prompt": "Read this task"})[
             "action_id"
         ]
@@ -274,7 +274,7 @@ print('measured trials finished')
     def test_cli_runs_pipeline_and_reads_outputs_over_http(self):
         import socket
 
-        engine = self.make_engine(execute=True)
+        engine = self.make_engine(workers=True)
         server = EngineHTTPServer(("127.0.0.1", 0), engine)
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02})
         thread.start()

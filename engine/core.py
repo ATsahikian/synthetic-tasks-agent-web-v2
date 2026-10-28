@@ -8,7 +8,7 @@ from pathlib import Path
 from .actions import canonical_json, fingerprint, load_actions, validate_name, validate_request_id
 from .discovery import discover_tasks, validate_component
 from .errors import CorruptLogError, EngineError
-from .state import OUTCOMES, dependency_references, empty_state, reduce_event
+from .state import dependency_references, empty_state, reduce_event
 from .storage import EventStore
 
 
@@ -52,19 +52,12 @@ class Engine:
         tasks_root=DEFAULT_TASKS_ROOT,
         *,
         actions_file=None,
-        initiate_action=None,
-        execute=False,
     ):
         self._lock = threading.RLock()
         self._closed = False
         self._unavailable = False
         self._store = None
         self._runner = None
-        if execute and initiate_action is not None:
-            raise EngineError("Choose execute or initiate_action, not both.")
-        self._initiate_action = self._log_initiation if initiate_action is None else initiate_action
-        if not callable(self._initiate_action):
-            raise EngineError("initiate_action must be callable.")
         self.catalog, self._discovered = discover_tasks(tasks_root)
         self.actions = load_actions(actions_file or ENGINE_DIRECTORY / "actions.json")
         self._states = {}
@@ -100,18 +93,15 @@ class Engine:
                 self._events[key] = events
                 self._requests[key] = requests
                 self._save_snapshot(key)
-            if execute:
-                from .runner import ActionRunner
+            from .runner import ActionRunner
 
-                self._runner = ActionRunner(self)
-                self._initiate_action = self._runner.initiate
-                self._runner.recover()
+            self._runner = ActionRunner(self)
+            self._runner.recover()
             # Resume commands left ready by a crash, without relaunching started actions.
             with self._lock:
                 for key in sorted(self._discovered):
                     self._start_ready(key)
-            if self._runner is not None:
-                self._runner.start_monitor()
+            self._runner.start_monitor()
         except BaseException:
             if self._runner is not None:
                 self._runner.close()
@@ -256,19 +246,8 @@ class Engine:
         self._save_snapshot(key)
         return acknowledgment(key, event)
 
-    @staticmethod
-    def _log_initiation(task_set, task, action):
-        # Demo actions have no process runner yet. A runner replaces this hook.
-        LOGGER.info(
-            "Initiated %s/%s action %s (%s); awaiting completion signal",
-            task_set,
-            task,
-            action["name"],
-            action["action_id"],
-        )
-
     def _start_ready(self, key):
-        """Persist each start before handing it to the execution integration."""
+        """Persist each start before launching its worker."""
         while self._states[key]["ready_action_ids"]:
             self._check_available()
             action_id = self._states[key]["ready_action_ids"][0]
@@ -286,7 +265,7 @@ class Engine:
                 {"dependency_actions": dependency_references(self._states[key], action)},
             )
             try:
-                self._initiate_action(*key, copy.deepcopy(self._states[key]["actions"][action_id]))
+                self._runner.initiate(*key, copy.deepcopy(self._states[key]["actions"][action_id]))
             except Exception as error:
                 if self._unavailable or self._closed:
                     raise
@@ -359,10 +338,8 @@ class Engine:
                 from .workflow import prepare_execution
 
                 extra["execution"] = prepare_execution(definition["runner"], request["parameters"])
-            elif self._runner is not None:
-                raise EngineError(
-                    "This action has no executable runner; use --manual or configure runner."
-                )
+            else:
+                raise EngineError("This action has no executable runner; configure runner.")
             accepted = self._commit(
                 key,
                 request,
@@ -378,44 +355,6 @@ class Engine:
             )
             self._start_ready(key)
             return accepted
-
-    def complete(self, task_set, task, body):
-        validate_body(body, ("request_id", "action_id", "outcome"), ("type", "result", "error"))
-        if body.get("type", "completed") != "completed":
-            raise EngineError(
-                "Only completion signals are accepted; the server owns action starts."
-            )
-        if not isinstance(body["outcome"], str) or body["outcome"] not in OUTCOMES:
-            raise EngineError("outcome must be succeeded, failed, cancelled or timed_out.")
-        if body.get("error") is not None and not isinstance(body["error"], str):
-            raise EngineError("error must be a string or null.")
-        request = {
-            "request_id": body["request_id"],
-            "action_id": body["action_id"],
-            "type": "completed",
-            "outcome": body["outcome"],
-            "result": copy.deepcopy(body.get("result")),
-            "error": body.get("error"),
-        }
-        if not isinstance(request["action_id"], str):
-            raise EngineError("action_id must be a UUID string.")
-        with self._lock:
-            self._check_available()
-            key = self._key(task_set, task)
-            previous = self._duplicate(key, request["request_id"], fingerprint("report", request))
-            if previous is not None:
-                return previous
-            self._ensure_discovered(key)
-            action = self._states[key]["actions"].get(request["action_id"])
-            if self._runner is not None and action and action.get("execution"):
-                raise EngineError(
-                    "The execution worker owns this action's completion.",
-                    status=409,
-                    code="worker_owned_action",
-                )
-            completed = self._commit_completion(key, request)
-            self._start_ready(key)
-            return completed
 
     def cancel(self, task_set, task, body):
         validate_body(body, ("request_id", "action_id"))
@@ -435,19 +374,6 @@ class Engine:
                 key, request, "cancel", "cancel_requested", request["action_id"], {}
             )
             if action["status"] == "started":
-                if self._runner is not None and action.get("execution"):
-                    self._runner.cancel(key, request["action_id"])
-                else:
-                    self._commit_completion(
-                        key,
-                        {
-                            "request_id": f"engine:cancel:{request['action_id']}",
-                            "action_id": request["action_id"],
-                            "type": "completed",
-                            "outcome": "cancelled",
-                            "result": None,
-                            "error": None,
-                        },
-                    )
+                self._runner.cancel(key, request["action_id"])
             self._start_ready(key)
             return accepted

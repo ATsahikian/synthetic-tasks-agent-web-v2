@@ -1,11 +1,16 @@
+import copy
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
-from engine.core import ENGINE_DIRECTORY, Engine
+from engine.core import Engine, acknowledgment
+from engine.runner import ActionRunner, job_directory
+from engine.storage import atomic_json_write
 
 
 def git(directory, *arguments):
@@ -57,12 +62,27 @@ class EngineFixture(unittest.TestCase):
         (self.task_directory.parent / "template.md").write_text("# Template\n", "utf-8")
         (self.task_directory / "design.md").write_text("# Design\n", "utf-8")
 
-    def make_engine(self, **options):
-        engine = Engine(self.root, actions_file=self.config, **options)
+    def make_engine(self, *, workers=False, initiate=None, **options):
+        def controlled_runner(engine):
+            # State tests control launches and reconcile real result files explicitly.
+            runner = ActionRunner(engine)
+            runner.initiate = initiate if initiate is not None else mock.Mock()
+            runner.recover = mock.Mock()
+            runner.start_monitor = mock.Mock()
+            return runner
+
+        if workers:
+            engine = Engine(self.root, actions_file=self.config, **options)
+        else:
+            with mock.patch("engine.runner.ActionRunner", side_effect=controlled_runner):
+                engine = Engine(self.root, actions_file=self.config, **options)
         self.addCleanup(engine.close)
         return engine
 
     def set_actions(self, definitions):
+        definitions = copy.deepcopy(definitions)
+        for definition in definitions.values():
+            definition.setdefault("runner", {"argv": [sys.executable, "-c", "pass"]})
         self.config.write_text(json.dumps({"schema_version": 1, "actions": definitions}), "utf-8")
 
     def command(self, engine, name, *, request_id=None, parameters=None):
@@ -71,17 +91,19 @@ class EngineFixture(unittest.TestCase):
             body["parameters"] = parameters
         return engine.command("set-one", "task-one", body)
 
-    def report(self, engine, action_id, kind, *, outcome="succeeded", request_id=None, **details):
-        body = {
-            "request_id": request_id or str(uuid.uuid4()),
-            "action_id": action_id,
-            "type": kind,
-        }
-        if kind == "completed":
-            body.update({"outcome": outcome, **details})
-        return engine.complete("set-one", "task-one", body)
+    def finish(self, engine, action_id, *, outcome="succeeded", result=None, error=None):
+        key = ("set-one", "task-one")
+        directory = job_directory(self.root, key, action_id, create=True)
+        atomic_json_write(
+            directory / "result.json", {"outcome": outcome, "result": result, "error": error}
+        )
+        with engine._lock:
+            action = engine._states[key]["actions"][action_id]
+            completion = engine._runner._completion(key, action)
+            engine._runner._apply(key, action_id, completion)
+            return acknowledgment(key, engine._requests[key][f"engine:completion:{action_id}"])
 
     def complete_action(self, engine, name):
         acknowledgment = self.command(engine, name)
-        self.report(engine, acknowledgment["action_id"], "completed")
+        self.finish(engine, acknowledgment["action_id"])
         return acknowledgment["action_id"]
