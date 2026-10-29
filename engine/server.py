@@ -179,7 +179,6 @@ class Handler(BaseHTTPRequestHandler):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Run the v2 task event engine.")
     parser.add_argument("--tasks-root", type=Path, default=DEFAULT_TASKS_ROOT)
-    parser.add_argument("--actions-file", type=Path, help="Predefined action configuration.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4181)
     arguments = parser.parse_args(argv)
@@ -187,10 +186,7 @@ def main(argv=None):
     engine = None
     server = None
     try:
-        engine = Engine(
-            arguments.tasks_root,
-            actions_file=arguments.actions_file,
-        )
+        engine = Engine(arguments.tasks_root)
         server = EngineHTTPServer((arguments.host, arguments.port), engine)
         LOGGER.info("Listening on http://%s:%s", *server.server_address[:2])
         LOGGER.info(

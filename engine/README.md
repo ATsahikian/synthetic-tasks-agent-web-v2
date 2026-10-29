@@ -20,7 +20,8 @@ http://127.0.0.1:4181. The default task root is the sibling
 `synthetic-tasks-project-v2`, resolved from the engine location. An empty project
 is valid. Stop the server with Ctrl+C.
 
-Server options are `--tasks-root`, `--actions-file`, `--host`, and `--port`.
+Server options are `--tasks-root`, `--host`, and `--port`.
+Action definitions are loaded from the bundled `actions/actions.json`.
 Command definitions are loaded from the bundled `commands/command.json`.
 Configuration changes take effect on restart and affect newly accepted commands.
 Accepted commands retain their original parameters, relationships, and prepared
@@ -253,8 +254,9 @@ and cancels its owning command. `--request-id` supplies a stable request ID.
 with status 0 only for success. Without `--wait`, status 0 means accepted.
 Ctrl+C leaves the command running and exits the client with status 130.
 
-For a lightweight demonstration, start with `--actions-file actions/actions.demo.json`
-and use `one-action` or `run` to execute `prepare`, `process`, and `summarize`.
+For a lightweight demonstration, copy the definitions from `actions/actions.demo.json`
+into `actions/actions.json` and restart the server. Use `one-action` or `run` to
+execute `prepare`, `process`, and `summarize`.
 These jobs are independent; the default `one-shot` requires the built-in workflow
 jobs from the regular action catalog.
 
