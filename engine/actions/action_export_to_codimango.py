@@ -186,6 +186,8 @@ def export_task(source, root, execute):
 
 class action_export_to_codimango(AsyncActionHandler):
     name = "export_to_codimango"
+    parameters = frozenset({"source"})
+    required_parameters = frozenset({"source"})
     runner_fields = frozenset({"repo_path"})
 
     def configure_runner(self, runner, directory):
@@ -205,16 +207,9 @@ class action_export_to_codimango(AsyncActionHandler):
         spec = config["execution"]
         task_path = Path(config["task_path"])
         design_path, template_path = task_path / "design.md", task_path.parent / "template.md"
-        dependencies = config["dependency_results"]
-        implementation_name = next((name for name in ("impl", "implement") if name in dependencies), None)
-        if implementation_name is not None:
-            inputs = dependencies[implementation_name] or {}
-            if inputs.get("oracle_passed") is not True:
-                raise RuntimeError("A verified passing implementation oracle is required before exporting.")
-        else:
-            # Older accepted exports retain their captured analysis dependency.
-            inputs = dependencies.get("local_bench_analyze", {})
-            read_document(inputs.get("report_path", ""))
+        inputs = config["action"]["parameters"]["source"]
+        if inputs.get("oracle_passed") is not True:
+            raise RuntimeError("A verified passing implementation oracle is required before exporting.")
         if inputs.get("design_sha256") != digest(design_path) or inputs.get(
             "template_sha256"
         ) != digest(template_path):

@@ -6,7 +6,7 @@ from unittest import mock
 from engine.actions import load_actions
 from engine.core import Engine
 from engine.errors import CorruptLogError, EngineError
-from engine.tests.support import EngineFixture
+from engine.tests.support import HistoricalEngineFixture as EngineFixture
 
 
 class EngineTests(EngineFixture):
@@ -534,14 +534,11 @@ class EngineTests(EngineFixture):
         self.assertFalse(self.review.exists())
 
     def test_invalid_definitions_and_request_validation(self):
-        for actions in (
-            {"prepare": {"dependencies": ["missing"]}},
-            {"prepare": {"dependencies": ["process"]}, "process": {"dependencies": ["prepare"]}},
-            {"prepare": {"dependencies": ["process", "process"]}, "process": {"dependencies": []}},
-            {"prepare": {"dependencies": [], "invalidated_by": ["process"]},
-             "process": {"dependencies": []}},
+        for definitions in (
+            {"prepare": {"handler": "action_command", "dependencies": []}},
+            {"prepare": {"handler": "action_command", "invalidated_by": ["process"]}},
         ):
-            self.set_actions(actions)
+            self.config.write_text(json.dumps({"schema_version": 1, "actions": definitions}))
             with self.assertRaises(EngineError):
                 load_actions(self.config)
         self.set_actions({"prepare": {"dependencies": []}})

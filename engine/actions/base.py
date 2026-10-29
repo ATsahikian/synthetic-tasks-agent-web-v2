@@ -13,6 +13,7 @@ from ..errors import EngineError
 
 class ActionHandler(ABC):
     parameters = frozenset()
+    accepts_arbitrary_parameters = False
     required_parameters = frozenset()
     runner_fields = frozenset()
 

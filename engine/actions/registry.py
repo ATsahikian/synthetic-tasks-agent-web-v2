@@ -34,4 +34,7 @@ def prepare_execution(definition, parameters):
 
 
 def run_action(config, execute, output_path):
+    from ..commands.legacy import adapt_configuration
+
+    config = adapt_configuration(config)
     return handler_for(config["execution"].get("handler")).run(config, execute, output_path)

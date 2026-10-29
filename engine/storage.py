@@ -172,3 +172,9 @@ class EventStore:
 
     def write_snapshot(self, key, state):
         atomic_json_write(self._task_directory(key) / "job.json", state)
+
+    def write_pool(self, key, state):
+        file = self._task_directory(key) / "action-pool.json"
+        if file.is_symlink():
+            raise EngineError("Action pool must not be a symlink.")
+        atomic_json_write(file, state["action_pool"])

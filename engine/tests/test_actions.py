@@ -9,7 +9,7 @@ from engine.actions.action_commit_desing import action_commit_desing
 from engine.actions.common import design_sources
 from engine.cli import main as cli_main
 from engine.errors import EngineError
-from engine.tests.support import EngineFixture
+from engine.tests.support import HistoricalEngineFixture as EngineFixture
 from engine.tests import test_runner
 
 
@@ -132,9 +132,7 @@ class ActionTests(EngineFixture):
     def test_implementation_approval_executes_without_external_commands(self):
         config = {
             "task_path": str(self.task_directory),
-            "dependency_results": {
-                "implement": {**design_sources(self.task_directory), "oracle_passed": True},
-            },
+            "action": {"parameters": {"source": {**design_sources(self.task_directory), "oracle_passed": True}}},
             "execution": {"handler": "action_commit_impl"},
         }
 

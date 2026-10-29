@@ -2,17 +2,16 @@
 
 Repository: https://github.com/ATsahikian/synthetic-tasks-agent-web-v2
 
-This application provides a Python task event engine with a REST API, action
-dependencies, synchronous handlers, detached asynchronous workers, event history, and
-restart recovery. Clients submit commands and cancellations. Synchronous actions
-record their result directly; asynchronous workers save completion results in
-result.json for the engine to consume.
+This application provides a Python engine where commands execute ordered action
+chains with durable events, a persistent action pool, detached workers, and restart
+recovery. Actions are function-like jobs with one parameter object. `one-shot` runs
+through trajectory analysis; `one-action` executes a caller-supplied debugging call.
 
 ## Project layout
 
 - `engine/`: Python engine, action definitions, API documentation, and tests.
-- `engine/actions/`: One handler class per `action_<action-name>.py` file, lifecycle base classes, registry,
-  and action configuration using explicit `handler` class references.
+- `engine/actions/`: Independent job handlers, parameter contracts, and internal execution settings.
+- `engine/commands/`: Command definitions, handlers, dependency and parameter bindings, scheduling, and recovery.
 - `web/`: Reserved for the future web interface.
 
 ## Run the engine

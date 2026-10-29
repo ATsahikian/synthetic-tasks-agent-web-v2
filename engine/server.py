@@ -99,6 +99,8 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, engine.health()
             if parts == ["api", "actions"]:
                 return 200, engine.list_actions()
+            if parts == ["api", "commands"]:
+                return 200, engine.list_commands()
             if parts == ["api", "tasks"]:
                 return 200, engine.list_tasks()
             if is_output:
@@ -140,7 +142,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 if parts[4] == "state":
                     raise EngineError("Use GET for state.", status=405)
-            if parts in (["health"], ["api", "tasks"], ["api", "actions"]):
+            if parts in (["health"], ["api", "tasks"], ["api", "actions"], ["api", "commands"]):
                 raise EngineError("Use GET for this endpoint.", status=405)
         else:
             raise EngineError("Method is unsupported.", status=405)

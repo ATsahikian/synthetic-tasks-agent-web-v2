@@ -10,6 +10,7 @@ from ..errors import EngineError
 
 class action_command(AsyncActionHandler):
     name = "command"
+    accepts_arbitrary_parameters = True
 
     runner_fields = frozenset({
         "argv", "input", "env", "cwd", "timeout_ms",

@@ -14,6 +14,10 @@ def validate_parameters(name, parameters, allowed, required):
         raise EngineError(
             f"Unknown {name} parameters: {', '.join(sorted(set(parameters) - allowed))}."
         )
+    if "source" in parameters and not isinstance(parameters["source"], dict):
+        raise EngineError("source must be an object containing the action's source data.")
+    if "source_id" in parameters and not isinstance(parameters["source_id"], str):
+        raise EngineError("source_id must be text.")
     for key in ("prompt", "reference_task", "evidence_path", "model", "benchmark_agent"):
         if key in parameters and (
             not isinstance(parameters[key], str)
@@ -43,9 +47,8 @@ def design_sources(task_path):
     return {"design_sha256": digest(design_path), "template_sha256": digest(template_path)}
 
 
-def require_approval(config, names, *, approved=False, oracle=False):
-    dependencies = config["dependency_results"]
-    approval = next((dependencies[name] for name in names if name in dependencies), {})
+def require_source(config, *, approved=False, oracle=False):
+    approval = config["action"]["parameters"]["source"]
     task_path = Path(config["task_path"])
     if approval.get("design_sha256") != digest(task_path / "design.md") or approval.get(
         "template_sha256"
@@ -54,8 +57,7 @@ def require_approval(config, names, *, approved=False, oracle=False):
             "Design or template changed; approve the current design and rerun implementation."
         )
     if approved and approval.get("approved") is not True:
-        kind = "design" if names[0] in ("desing", "commit_desing") else "implementation"
-        raise RuntimeError(f"A successful {kind} approval is required.")
+        raise RuntimeError("Approved source data is required.")
     if oracle and approval.get("oracle_passed") is not True:
         raise RuntimeError("A verified passing implementation oracle is required.")
     return approval

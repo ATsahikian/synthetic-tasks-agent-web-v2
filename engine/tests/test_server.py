@@ -28,7 +28,15 @@ class ServerTests(EngineFixture):
             "process": self.script("print('Processed task')", dependencies=["prepare"]),
             "summarize": self.script("print('Summarized task')", dependencies=["process"]),
         })
-        self.engine = self.make_engine(workers=True)
+        commands = {
+            "one-action": {"handler": "command_one_action"},
+            "demo": {"handler": "command_one_shot", "actions": [
+                {"action": name, "dependencies": ([] if index == 0 else [names[index-1]]), "parameter_bindings": {}}
+                for names in [["prepare", "process", "summarize"]]
+                for index, name in enumerate(names)
+            ]},
+        }
+        self.engine = self.make_engine(workers=True, commands=commands)
         self.server = EngineHTTPServer(("127.0.0.1", 0), self.engine)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.02})
         self.thread.start()
@@ -74,27 +82,28 @@ class ServerTests(EngineFixture):
         status, catalog = self.request("GET", "/api/tasks")
         self.assertEqual(catalog["task_sets"][0]["tasks"][0]["name"], "task-one")
         status, definitions = self.request("GET", "/api/actions")
-        self.assertEqual(definitions["actions"]["process"]["dependencies"], ["prepare"])
+        self.assertNotIn("dependencies", definitions["actions"]["process"])
+        status, commands = self.request("GET", "/api/commands")
+        self.assertEqual(status, 200)
+        self.assertIn("one-action", commands["commands"])
         task_url = "/api/tasks/set-one/task-one"
-        process_body = {"request_id": "process-command", "action": "process"}
-        status, process = self.request("POST", task_url + "/commands", process_body)
+        body = {"request_id": "demo-command", "command": "demo", "parameters": {"input": "demo"}}
+        status, receipt = self.request("POST", task_url + "/commands", body)
         self.assertEqual(status, 201)
         _, state = self.request("GET", task_url + "/state")
-        self.assertEqual(state["actions"][process["action_id"]]["status"], "waiting")
-        _, prepare = self.request("POST", task_url + "/commands", {
-            "request_id": "prepare-command", "action": "prepare", "parameters": {"input": "demo"},
-        })
+        self.assertEqual([state["actions"][identity]["status"] for identity in receipt["action_ids"]], ["started", "queued", "queued"])
         self.gate.touch()
-        self.assertEqual(self.finished(self.engine, process["action_id"])["outcome"], "succeeded")
+        self.assertEqual(self.finished(self.engine, receipt["action_ids"][-1])["outcome"], "succeeded")
         status, state = self.request("GET", task_url + "/state")
-        self.assertEqual(state["actions"][prepare["action_id"]]["result"], {"exit_code": 0, "ok": True})
-        self.assertEqual(state["revision"], 5)
+        self.assertEqual(state["actions"][receipt["action_ids"][0]]["result"], {"exit_code": 0, "ok": True})
+        self.assertEqual(state["commands"][receipt["command_id"]]["outcome"], "succeeded")
+        self.assertEqual(state["revision"], 8)
         status, tail = self.request("GET", task_url + "/events?after=2")
         self.assertEqual(status, 200)
-        self.assertEqual([event["sequence"] for event in tail["events"]], [3, 4, 5])
-        self.assertEqual([event["type"] for event in tail["events"]], ["completed", "started", "completed"])
+        self.assertEqual([event["sequence"] for event in tail["events"]], list(range(3, 9)))
+        self.assertEqual([event["type"] for event in tail["events"]], ["completed", "started", "completed", "started", "completed", "command_completed"])
         self.assertEqual(tail["events"][0]["payload"]["result"], {"exit_code": 0, "ok": True})
-        status, empty_tail = self.request("GET", task_url + "/events?after=999")
+        _, empty_tail = self.request("GET", task_url + "/events?after=999")
         self.assertEqual(empty_tail["events"], [])
 
     def test_concurrent_http_retries_commit_once(self):
@@ -106,12 +115,15 @@ class ServerTests(EngineFixture):
             ))
         self.assertTrue(all(response == responses[0] for response in responses))
         self.assertEqual(responses[0][0], 201)
-        self.assertEqual(self.engine.state("set-one", "task-one")["revision"], 1)
+        self.assertEqual(self.engine.state("set-one", "task-one")["revision"], 2)
 
     def test_http_errors_are_json_and_events_are_read_only(self):
         task_url = "/api/tasks/set-one/task-one"
         for method, path, body, expected_status in (
             ("GET", "/missing", None, 404),
+            ("POST", task_url + "/actions", {"request_id": "direct", "action": "prepare"}, 404),
+            ("POST", task_url + "/commands", {"request_id": "runner", "command": "one-action", "parameters": {"action": "prepare", "runner": {}}}, 400),
+            ("POST", task_url + "/commands", {"request_id": "inputs", "command": "one-action", "parameters": {"action": "prepare", "inputs": {}}}, 400),
             ("GET", "/api/tasks/set-one/missing/state", None, 404),
             ("GET", "/api/tasks/%2E%2E/task-one/state", None, 400),
             ("GET", "/api/tasks/set-one/task%2Fone/state", None, 400),

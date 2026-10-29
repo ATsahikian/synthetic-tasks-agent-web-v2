@@ -2,13 +2,14 @@ import json
 
 from engine.actions.common import design_sources
 from engine.core import ENGINE_DIRECTORY
-from engine.tests.support import EngineFixture, git, task_repository
+from engine.tests.support import HistoricalEngineFixture as EngineFixture, git, task_repository
 
 
 class CommitDesingTests(EngineFixture):
     def setUp(self):
         super().setUp()
         definition = json.loads((ENGINE_DIRECTORY / "actions" / "actions.json").read_text())["actions"]["commit_desing"]
+        definition["dependencies"] = ["redesign"]
         self.set_actions({"redesign": {"dependencies": []}, "commit_desing": definition})
 
     def redesign(self, engine):

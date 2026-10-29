@@ -8,7 +8,10 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from engine.actions import prepare_execution
+from engine.actions import prepare_execution, fingerprint, validate_name
+from engine.core import validate_body
+from engine.commands.legacy import dependency_references
+from engine.errors import EngineError
 from engine.core import Engine, acknowledgment
 from engine.runner import ActionRunner, job_directory
 from engine.storage import atomic_json_write
@@ -91,8 +94,10 @@ class EngineFixture(unittest.TestCase):
         return engine
 
     def set_actions(self, definitions):
+        self.historical_definitions = copy.deepcopy(definitions)
         definitions = copy.deepcopy(definitions)
         for definition in definitions.values():
+            definition.pop("dependencies", None)
             definition.setdefault("handler", "action_command")
             if definition["handler"] == "action_command":
                 definition.setdefault("runner", {"argv": [sys.executable, "-c", "pass"]})
@@ -111,8 +116,8 @@ class EngineFixture(unittest.TestCase):
         payload = {
             "action": name,
             "parameters": request["parameters"],
-            "dependencies": definition["dependencies"],
-            "execution": prepare_execution(definition, request["parameters"]),
+            "dependencies": self.historical_definitions[name].get("dependencies", []),
+            "execution": historical_execution(definition, request["parameters"]),
         }
         if "execution_type" in definition:
             payload["execution_type"] = definition["execution_type"]
@@ -138,3 +143,61 @@ class EngineFixture(unittest.TestCase):
         acknowledgment = self.command(engine, name)
         self.finish(engine, acknowledgment["action_id"])
         return acknowledgment["action_id"]
+
+
+def historical_execution(definition, parameters):
+    """Prepare an old invocation while retaining its original parameter contents."""
+    from engine.actions.registry import handler_for
+
+    values = copy.deepcopy(parameters)
+    for name in handler_for(definition["handler"]).required_parameters:
+        if name not in values:
+            values[name] = "historical-source" if name == "source_id" else {}
+    return prepare_execution(definition, values)
+
+
+class HistoricalEngineFixture(EngineFixture):
+    """Generate schema v1 events to exercise supported historical recovery paths.
+
+    These fixtures do not represent the current REST submission interface.
+    New command acceptance and scheduling are covered in test_commands/test_server.
+    """
+
+    def command(self, engine, name, *, request_id=None, parameters=None):
+        body = {"request_id": request_id or str(uuid.uuid4()), "action": name, "parameters": parameters or {}}
+        validate_body(body, ("request_id", "action", "parameters"))
+        validate_name(name)
+        with engine._lock:
+            engine._check_available()
+            key = engine._key("set-one", "task-one")
+            previous = engine._duplicate(key, body["request_id"], fingerprint("command", body))
+            if previous is not None:
+                return previous
+            engine._ensure_discovered(key)
+            definition = engine.actions[name]
+            action_id = str(uuid.uuid4())
+            payload = {
+                "action": name, "parameters": body["parameters"],
+                "dependencies": self.historical_definitions[name].get("dependencies", []),
+                "execution": historical_execution(definition, body["parameters"]),
+                "mode": definition["mode"],
+            }
+            if "execution_type" in definition:
+                payload["execution_type"] = definition["execution_type"]
+            try:
+                references = dependency_references(engine._states[key], payload)
+            except EngineError as error:
+                if error.code != "dependencies_not_ready":
+                    raise
+                receipt = engine._commit(key, body, "command", "waiting", action_id, payload)
+            else:
+                payload["dependency_actions"] = references
+                if definition["mode"] == "sync":
+                    action = {"action_id": action_id, "name": name, **payload}
+                    payload.update(engine._execute_sync(key, action))
+                    receipt = engine._commit(key, body, "command", "completed", action_id, payload)
+                else:
+                    receipt = engine._commit(key, body, "command", "started", action_id, payload)
+                    engine._initiate(key, action_id)
+            engine._start_ready(key)
+            return receipt

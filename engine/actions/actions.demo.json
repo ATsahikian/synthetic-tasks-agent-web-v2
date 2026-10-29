@@ -2,7 +2,6 @@
   "schema_version": 1,
   "actions": {
     "prepare": {
-      "dependencies": [],
       "mode": "async",
       "handler": "action_command",
       "runner": {
@@ -14,9 +13,6 @@
       }
     },
     "process": {
-      "dependencies": [
-        "prepare"
-      ],
       "mode": "async",
       "handler": "action_command",
       "runner": {
@@ -28,9 +24,6 @@
       }
     },
     "summarize": {
-      "dependencies": [
-        "process"
-      ],
       "mode": "async",
       "handler": "action_command",
       "runner": {

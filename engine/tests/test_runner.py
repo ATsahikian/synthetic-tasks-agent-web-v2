@@ -12,7 +12,7 @@ from engine.actions import load_actions
 from engine.core import ENGINE_DIRECTORY, Engine
 from engine.errors import EngineError
 from engine.runner import job_directory
-from engine.tests.support import EngineFixture
+from engine.tests.support import HistoricalEngineFixture as EngineFixture
 from engine.worker import group_exists, process_identity, same_process, stop_group
 
 

@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .actions import (
-    canonical_json, fingerprint, load_actions, prepare_execution, run_action,
-    validate_name, validate_request_id,
+    canonical_json, fingerprint, load_actions, run_action, validate_request_id,
 )
 from .discovery import discover_tasks, validate_component
 from .errors import CorruptLogError, EngineError
-from .state import dependency_references, empty_state, reduce_event
+from .state import empty_state, reduce_event
+from .commands import CommandScheduler, load_commands
+from .commands import legacy
 from .storage import EventStore
 
 
@@ -47,11 +48,21 @@ def acknowledgment(key, event):
         "sequence": event["sequence"],
         "type": event["type"],
     }
-    if event["type"] == "completed":
+    if event.get("command_id"):
+        receipt["command_id"] = event["command_id"]
+        if event["type"] == "command_started":
+            receipt["action_ids"] = [step["action_id"] for step in event["payload"]["steps"]]
+            if len(receipt["action_ids"]) == 1:
+                receipt["action_id"] = receipt["action_ids"][0]
+            else:
+                receipt.pop("action_id")
+    if event["type"] in ("completed", "command_completed"):
         receipt.update({
             name: copy.deepcopy(event["payload"][name])
             for name in ("outcome", "result", "error")
         })
+    if event["type"] == "command_completed":
+        receipt["failed_action_id"] = event["payload"]["failed_action_id"]
     return receipt
 
 
@@ -61,6 +72,7 @@ class Engine:
         tasks_root=DEFAULT_TASKS_ROOT,
         *,
         actions_file=None,
+        commands=None,
     ):
         self._lock = threading.RLock()
         self._closed = False
@@ -69,6 +81,8 @@ class Engine:
         self._runner = None
         self.catalog, self._discovered = discover_tasks(tasks_root)
         self.actions = load_actions(actions_file or ENGINE_DIRECTORY / "actions" / "actions.json")
+        self.commands = load_commands(commands)
+        self._scheduler = CommandScheduler(self)
         self._states = {}
         self._events = {}
         self._requests = {}
@@ -108,7 +122,7 @@ class Engine:
             self._runner.recover()
             # Resume commands left ready by a crash, without relaunching started actions.
             with self._lock:
-                for key in sorted(self._discovered):
+                for key in sorted(self._states):
                     self._start_ready(key)
             self._runner.start_monitor()
         except BaseException:
@@ -152,8 +166,20 @@ class Engine:
             return copy.deepcopy(self.catalog)
 
     def list_actions(self):
+        from .actions.registry import handler_for
+
         with self._lock:
-            return {"schema_version": 1, "actions": copy.deepcopy(self.actions)}
+            actions = copy.deepcopy(self.actions)
+            for definition in actions.values():
+                handler = handler_for(definition["handler"])
+                definition["parameters"] = sorted(handler.parameters)
+                definition["required_parameters"] = sorted(handler.required_parameters)
+                definition["accepts_arbitrary_parameters"] = handler.accepts_arbitrary_parameters
+            return {"schema_version": 1, "actions": actions}
+
+    def list_commands(self):
+        with self._lock:
+            return {"schema_version": 1, "commands": copy.deepcopy(self.commands)}
 
     def health(self):
         with self._lock:
@@ -219,15 +245,23 @@ class Engine:
             )
 
     def _save_snapshot(self, key):
-        try:
-            self._store.write_snapshot(key, self._states[key])
-        except OSError:
-            # The durable event remains authoritative; a later write or restart rebuilds this cache.
-            LOGGER.exception("Could not update job.json for %s/%s", *key)
+        for name, write in (("job.json", self._store.write_snapshot), ("action-pool.json", self._store.write_pool)):
+            try:
+                write(key, self._states[key])
+            except OSError:
+                # Events remain authoritative; projection writes are retried on later events/restart.
+                LOGGER.exception("Could not update %s for %s/%s", name, *key)
 
-    def _commit(self, key, request, operation, event_type, action_id, payload):
+    def _commit_command(self, key, request, operation, event_type, command_id, action_id, payload):
+        return self._commit(
+            key, request, operation, event_type, action_id,
+            {"operation": operation, "request": copy.deepcopy(request), **payload},
+            command_id=command_id,
+        )
+
+    def _commit(self, key, request, operation, event_type, action_id, payload, *, command_id=None):
         event = {
-            "schema_version": 1,
+            "schema_version": 2 if command_id else 1,
             "sequence": self._states[key]["revision"] + 1,
             "event_id": str(uuid.uuid4()),
             "request_id": request["request_id"],
@@ -237,6 +271,8 @@ class Engine:
             "type": event_type,
             "payload": payload,
         }
+        if command_id is not None:
+            event["command_id"] = command_id
         next_state = reduce_event(self._states[key], event)
         try:
             self._store.append(key, event)
@@ -256,37 +292,9 @@ class Engine:
         return acknowledgment(key, event)
 
     def _start_ready(self, key):
-        """Complete sync handlers inline; persist async starts before launching."""
-        while self._states[key]["ready_action_ids"]:
-            self._check_available()
-            action_id = self._states[key]["ready_action_ids"][0]
-            action = self._states[key]["actions"][action_id]
-            if action["mode"] == "sync":
-                captured = copy.deepcopy(action)
-                captured["dependency_actions"] = dependency_references(self._states[key], action)
-                self._commit_completion(
-                    key,
-                    {
-                        "request_id": f"engine:completion:{action_id}",
-                        "action_id": action_id,
-                        "type": "completed",
-                        **self._execute_sync(key, captured),
-                    },
-                )
-                continue
-            self._commit(
-                key,
-                {
-                    "request_id": f"engine:start:{action_id}",
-                    "action_id": action_id,
-                    "type": "started",
-                },
-                "start",
-                "started",
-                action_id,
-                {"dependency_actions": dependency_references(self._states[key], action)},
-            )
-            self._initiate(key, action_id)
+        self._scheduler.advance(key)
+        if key in self._discovered:
+            legacy.start_ready(self, key)
 
     def _initiate(self, key, action_id):
         try:
@@ -324,110 +332,13 @@ class Engine:
             return {"outcome": "failed", "result": None, "error": str(error)}
 
     def _commit_completion(self, key, request):
-        self._check_available()
         action = self._states[key]["actions"].get(request["action_id"])
-        if action is None:
-            raise EngineError("Unknown action ID.", status=404, code="action_not_found")
-        if action["status"] == "completed":
-            raise EngineError(
-                "Action is already completed.", status=409, code="action_already_completed"
-            )
-        if action["status"] != "started" and action["mode"] != "sync":
-            raise EngineError(
-                "Action has not been initiated by the server.",
-                status=409,
-                code="action_not_started",
-            )
-        return self._commit(
-            key,
-            request,
-            "report",
-            "completed",
-            request["action_id"],
-            {
-                "dependency_actions": (
-                    dependency_references(self._states[key], action)
-                    if action["status"] == "waiting"
-                    else copy.deepcopy(action["dependency_actions"])
-                ),
-                **{name: request[name] for name in ("outcome", "result", "error")},
-            },
-        )
+        if action is not None and action.get("command_id"):
+            return self._scheduler.complete(key, request)
+        return legacy.complete_action(self, key, request)
 
     def command(self, task_set, task, body):
-        validate_body(body, ("request_id", "action"), ("parameters",))
-        validate_name(body["action"])
-        if not isinstance(body.get("parameters", {}), dict):
-            raise EngineError("parameters must be a JSON object.")
-        request = {
-            "request_id": body["request_id"],
-            "action": body["action"],
-            "parameters": copy.deepcopy(body.get("parameters", {})),
-        }
-        with self._lock:
-            self._check_available()
-            key = self._key(task_set, task)
-            previous = self._duplicate(key, request["request_id"], fingerprint("command", request))
-            if previous is not None:
-                return previous
-            self._ensure_discovered(key)
-            definition = self.actions.get(request["action"])
-            if definition is None:
-                raise EngineError("Unknown predefined action.", status=404, code="action_not_found")
-            action_id = str(uuid.uuid4())
-            current = self._states[key]["current_actions"].get(request["action"])
-            if current and self._states[key]["actions"][current]["status"] != "completed":
-                raise EngineError(
-                    "An invocation of this action is already active.",
-                    status=409,
-                    code="action_already_active",
-                )
-            extra = {"mode": definition["mode"]}
-            if "execution_type" in definition:
-                extra["execution_type"] = definition["execution_type"]
-            extra["execution"] = prepare_execution(definition, request["parameters"])
-            payload = {
-                "action": request["action"],
-                "parameters": request["parameters"],
-                "dependencies": copy.deepcopy(definition["dependencies"]),
-                **extra,
-            }
-            try:
-                references = dependency_references(self._states[key], payload)
-            except EngineError as error:
-                if error.code != "dependencies_not_ready":
-                    raise
-                accepted = self._commit(key, request, "command", "waiting", action_id, payload)
-            else:
-                payload["dependency_actions"] = references
-                if definition["mode"] == "sync":
-                    action = {"action_id": action_id, "name": request["action"], **payload}
-                    payload.update(self._execute_sync(key, action))
-                    accepted = self._commit(key, request, "command", "completed", action_id, payload)
-                else:
-                    accepted = self._commit(key, request, "command", "started", action_id, payload)
-                    self._initiate(key, action_id)
-            self._start_ready(key)
-            return accepted
+        return self._scheduler.accept(task_set, task, body)
 
     def cancel(self, task_set, task, body):
-        validate_body(body, ("request_id", "action_id"))
-        if not isinstance(body["action_id"], str):
-            raise EngineError("action_id must be a UUID string.")
-        request = copy.deepcopy(body)
-        with self._lock:
-            self._check_available()
-            key = self._key(task_set, task)
-            previous = self._duplicate(key, request["request_id"], fingerprint("cancel", request))
-            if previous is not None:
-                return previous
-            action = self._states[key]["actions"].get(request["action_id"])
-            if action is None:
-                raise EngineError("Unknown action ID.", status=404, code="action_not_found")
-            accepted = self._commit(
-                key, request, "cancel", "cancel_requested", request["action_id"], {}
-            )
-            if action["status"] == "started":
-                self._runner.cancel(key, request["action_id"])
-            self._start_ready(key)
-            return accepted
+        return self._scheduler.cancel(task_set, task, body)

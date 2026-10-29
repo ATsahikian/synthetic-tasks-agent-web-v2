@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "commands": {
+    "one-shot": {
+      "label": "One shot",
+      "description": "Run the local task workflow through trajectory analysis.",
+      "handler": "command_one_shot",
+      "actions": [
+        {
+          "action": "redesign",
+          "dependencies": [],
+          "parameter_bindings": {}
+        },
+        {
+          "action": "commit_desing",
+          "dependencies": [
+            "redesign"
+          ],
+          "parameter_bindings": {
+            "source": {
+              "step": "redesign",
+              "value": "result"
+            }
+          }
+        },
+        {
+          "action": "impl",
+          "dependencies": [
+            "commit_desing"
+          ],
+          "parameter_bindings": {
+            "source": {
+              "step": "commit_desing",
+              "value": "result"
+            }
+          }
+        },
+        {
+          "action": "commit_impl",
+          "dependencies": [
+            "impl"
+          ],
+          "parameter_bindings": {
+            "source": {
+              "step": "impl",
+              "value": "result"
+            }
+          }
+        },
+        {
+          "action": "local_bench",
+          "dependencies": [
+            "commit_impl"
+          ],
+          "parameter_bindings": {
+            "source": {
+              "step": "commit_impl",
+              "value": "result"
+            }
+          }
+        },
+        {
+          "action": "local_bench_analyze",
+          "dependencies": [
+            "local_bench"
+          ],
+          "parameter_bindings": {
+            "source": {
+              "step": "local_bench",
+              "value": "result"
+            },
+            "source_id": {
+              "step": "local_bench",
+              "value": "action_id"
+            }
+          }
+        }
+      ]
+    },
+    "one-action": {
+      "label": "One action",
+      "description": "Debug one action with caller-supplied parameters.",
+      "handler": "command_one_action"
+    }
+  }
+}

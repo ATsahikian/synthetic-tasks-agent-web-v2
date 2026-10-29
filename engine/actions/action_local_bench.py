@@ -5,15 +5,17 @@ import os
 from pathlib import Path
 
 from .base import AsyncActionHandler
-from .common import require_approval
+from .common import require_source
 
 
 class action_local_bench(AsyncActionHandler):
     name = "local_bench"
     parameters = frozenset({
-        "model", "benchmark_agent", "attempts", "concurrency",
+        "source", "model", "benchmark_agent", "attempts", "concurrency",
         "timeout_multiplier", "agent_timeout_multiplier",
     })
+
+    required_parameters = frozenset({"source"})
 
     def prepare(self, runner, parameters):
         spec = super().prepare(runner, parameters)
@@ -24,13 +26,7 @@ class action_local_bench(AsyncActionHandler):
         action, spec = config["action"], config["execution"]
         parameters = action["parameters"]
         task_path = Path(config["task_path"])
-        approval = require_approval(
-            config, ("commit_impl", "impl", "commit-impl", "implement"),
-            approved=any(
-                name in config["dependency_results"] for name in ("commit_impl", "impl", "commit-impl")
-            ),
-            oracle=True,
-        )
+        approval = require_source(config, approved=True, oracle=True)
         attempts = parameters.get("attempts", 5)
         run_path = Path(config["job_path"]) / "benchmark"
         argv = [

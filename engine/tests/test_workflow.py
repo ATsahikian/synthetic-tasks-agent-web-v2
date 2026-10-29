@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from engine.cli import main as cli_main
+from engine.commands import load_commands
 from engine.core import ENGINE_DIRECTORY
 from engine.errors import EngineError
 from engine.server import EngineHTTPServer
@@ -88,45 +89,36 @@ print('measured trials finished')
 
     def test_default_task_workflow_with_oracle_benchmark_and_analysis(self):
         engine = self.make_engine(workers=True)
-        redesign = self.command(engine, "redesign", parameters={"prompt": "Revise the fixture"})[
-            "action_id"
-        ]
-        design_commit = self.command(engine, "commit_desing")["action_id"]
-        implement = self.command(engine, "impl", parameters={"agent": "claude"})["action_id"]
-        commit = self.command(engine, "commit_impl")["action_id"]
-        benchmark = self.command(engine, "local_bench", parameters={"attempts": 2, "concurrency": 2})[
-            "action_id"
-        ]
-        analyze = self.command(engine, "local_bench_analyze", parameters={"agent": "claude"})[
-            "action_id"
-        ]
-        export = self.command(engine, "export_to_codimango")["action_id"]
+        receipt = engine.command("set-one", "task-one", {
+            "request_id": "one-shot", "command": "one-shot",
+            "parameters": {"agent": "claude", "prompt": "Revise the fixture", "action_parameters": {"local_bench": {"attempts": 2, "concurrency": 2}}},
+        })
+        command = engine.state("set-one", "task-one")["commands"][receipt["command_id"]]
+        ids = {step["action"]: step["action_id"] for step in command["steps"]}
+        redesign, design_commit, implement, commit, benchmark, analyze = [ids[name] for name in ("redesign", "commit_desing", "impl", "commit_impl", "local_bench", "local_bench_analyze")]
         self.assertEqual(self.finished(engine, analyze)["outcome"], "succeeded")
-        self.assertEqual(self.finished(engine, export)["outcome"], "succeeded")
         state = engine.state("set-one", "task-one")
         self.assertEqual((self.task_directory / "design.md").read_text(), "# Redesigned fixture\n")
         self.assertTrue(state["actions"][implement]["result"]["oracle_passed"])
-        self.assertEqual(state["actions"][design_commit]["dependency_actions"], {"redesign": redesign})
+        self.assertEqual(state["actions"][design_commit]["parameters"]["source"], state["actions"][redesign]["result"])
         self.assertEqual(state["actions"][design_commit]["result"]["commit"], git(self.root, "rev-parse", "HEAD"))
-        self.assertEqual(state["actions"][implement]["dependency_actions"], {"commit_desing": design_commit})
+        self.assertEqual(state["actions"][implement]["parameters"]["source"], state["actions"][design_commit]["result"])
         self.assertTrue(state["actions"][commit]["result"]["approved"])
-        self.assertEqual(state["actions"][commit]["dependency_actions"], {"impl": implement})
-        self.assertEqual(state["actions"][benchmark]["dependency_actions"], {"commit_impl": commit})
+        self.assertEqual(state["actions"][commit]["parameters"]["source"], state["actions"][implement]["result"])
+        self.assertEqual(state["actions"][benchmark]["parameters"]["source"], state["actions"][commit]["result"])
         self.assertEqual(state["actions"][benchmark]["result"]["passed"], 1)
         self.assertEqual(state["actions"][benchmark]["result"]["total"], 2)
         report = Path(state["actions"][analyze]["result"]["report_path"])
         self.assertTrue(report.exists())
         source = json.loads((report.parent / "analysis.source.json").read_text())
         self.assertEqual(source["benchmark_action_id"], benchmark)
-        self.assertEqual(state["actions"][export]["dependency_actions"], {"impl": implement})
-        self.assertEqual(
-            state["actions"][export]["result"]["push_commit"],
-            git(self.export_remote, "rev-parse", "refs/heads/main"),
-        )
+        self.assertNotIn("export_to_codimango", state["current_actions"])
+        self.assertEqual(state["commands"][receipt["command_id"]]["outcome"], "succeeded")
+        self.assertEqual(json.loads((self.review / "action-pool.json").read_text()), [])
         self.assertTrue(
             all(
                 not state["actions"][action]["stale"]
-                for action in (redesign, design_commit, implement, commit, benchmark, analyze, export)
+                for action in (redesign, design_commit, implement, commit, benchmark, analyze)
             )
         )
         self.assertFalse((self.task_directory / "design-status.json").exists())
@@ -135,10 +127,11 @@ print('measured trials finished')
         engine = self.make_engine(workers=True)
         redesign = self.command(engine, "redesign")["action_id"]
         self.assertEqual(self.finished(engine, redesign)["outcome"], "succeeded")
-        design_commit = self.command(engine, "commit_desing")
-        self.assertEqual(design_commit["outcome"], "succeeded")
+        redesign_result = engine.state("set-one", "task-one")["actions"][redesign]["result"]
+        design_commit = self.command(engine, "commit_desing", parameters={"source": redesign_result})
+        approval = engine.state("set-one", "task-one")["actions"][design_commit["action_id"]]["result"]
         (self.task_directory / "design.md").write_text("# Updated design")
-        implement = self.command(engine, "impl")["action_id"]
+        implement = self.command(engine, "impl", parameters={"source": approval})["action_id"]
         result = self.finished(engine, implement)
         self.assertEqual(result["outcome"], "failed")
         self.assertIn("Design or template changed", result["error"])
@@ -148,38 +141,31 @@ print('measured trials finished')
         aliases = {"commit_desing": "commit-desing", "impl": "implement", "commit_impl": "commit-impl"}
         old_definitions = {}
         for name, definition in definitions.items():
-            definition["dependencies"] = [aliases.get(value, value) for value in definition["dependencies"]]
             old_definitions[aliases.get(name, name)] = definition
         self.set_actions(old_definitions)
-        engine = self.make_engine(workers=True)
-        receipts = {
-            name: self.command(engine, name)["action_id"]
-            for name in ("redesign", "commit-desing", "implement", "commit-impl", "local_bench", "local_bench_analyze")
-        }
-        self.assertEqual(self.finished(engine, receipts["local_bench_analyze"])["outcome"], "succeeded")
+        commands = load_commands()
+        for step in commands["one-shot"]["actions"]:
+            step["action"] = aliases.get(step["action"], step["action"])
+            step["dependencies"] = [aliases.get(name, name) for name in step["dependencies"]]
+            for binding in step["parameter_bindings"].values():
+                binding["step"] = aliases.get(binding["step"], binding["step"])
+        engine = self.make_engine(workers=True, commands=commands)
+        receipt = engine.command("set-one", "task-one", {"request_id": "aliases", "command": "one-shot"})
+        self.assertEqual(self.finished(engine, receipt["action_ids"][-1])["outcome"], "succeeded")
         state = engine.state("set-one", "task-one")
-        self.assertEqual(
-            state["actions"][receipts["implement"]]["dependency_actions"],
-            {"commit-desing": receipts["commit-desing"]},
-        )
-        self.assertEqual(
-            state["actions"][receipts["local_bench"]]["dependency_actions"],
-            {"commit-impl": receipts["commit-impl"]},
-        )
+        self.assertEqual(set(state["current_actions"]), {"redesign", "commit-desing", "implement", "commit-impl", "local_bench", "local_bench_analyze"})
 
     def test_export_runs_after_implementation_without_local_benchmark(self):
-        engine = self.make_engine(workers=True)
-        self.command(engine, "redesign")
-        self.command(engine, "commit_desing")
-        implement = self.command(engine, "impl")["action_id"]
-        export = self.command(engine, "export_to_codimango")["action_id"]
-        self.assertEqual(self.finished(engine, implement)["outcome"], "succeeded")
+        commands = load_commands()
+        commands["implement-only"] = {**commands["one-shot"], "actions": commands["one-shot"]["actions"][:3]}
+        engine = self.make_engine(workers=True, commands=commands)
+        receipt = engine.command("set-one", "task-one", {"request_id": "implement", "command": "implement-only"})
+        source = self.finished(engine, receipt["action_ids"][-1])["result"]
+        export = self.command(engine, "export_to_codimango", parameters={"source": source})["action_id"]
         self.assertEqual(self.finished(engine, export)["outcome"], "succeeded")
         state = engine.state("set-one", "task-one")
-        self.assertEqual(state["actions"][export]["dependency_actions"], {"impl": implement})
-        self.assertEqual(
-            set(state["current_actions"]), {"redesign", "commit_desing", "impl", "export_to_codimango"}
-        )
+        self.assertEqual(state["actions"][export]["parameters"], {"source": source})
+        self.assertEqual(set(state["current_actions"]), {"redesign", "commit_desing", "impl", "export_to_codimango"})
 
     def test_commit_impl_requires_passing_oracle_and_blocks_benchmark(self):
         definitions = json.loads(self.config.read_text())["actions"]
@@ -203,21 +189,16 @@ print('measured trials finished')
                 "export_to_codimango": definitions["export_to_codimango"],
             }
         )
-        engine = self.make_engine(workers=True)
-        implement = self.command(engine, "impl")["action_id"]
-        commit = self.command(engine, "commit_impl")["action_id"]
-        benchmark = self.command(engine, "local_bench")["action_id"]
-        export = self.command(engine, "export_to_codimango")["action_id"]
-        self.assertEqual(self.finished(engine, implement)["outcome"], "succeeded")
-        result = self.finished(engine, commit)
-        self.assertEqual(result["outcome"], "failed")
-        self.assertIn("passing implementation oracle", result["error"])
-        self.assertEqual(self.finished(engine, export)["outcome"], "failed")
-        self.assertFalse((self.export_root / "cyber-bench-fixture-1.1-task").exists())
-        self.assertEqual(
-            engine.state("set-one", "task-one")["actions"][benchmark]["blocked_by"],
-            ["commit_impl"],
-        )
+        commands = load_commands()
+        steps = commands["one-shot"]["actions"][2:5]
+        steps[0] = {"action": "impl", "dependencies": [], "parameter_bindings": {}}
+        commands["bad-oracle"] = {"handler": "command_one_shot", "actions": steps}
+        engine = self.make_engine(workers=True, commands=commands)
+        receipt = engine.command("set-one", "task-one", {"request_id": "bad-oracle", "command": "bad-oracle"})
+        self.assertEqual(self.finished(engine, receipt["action_ids"][1])["outcome"], "failed")
+        state = engine.state("set-one", "task-one")
+        self.assertEqual(state["actions"][receipt["action_ids"][2]]["outcome"], "cancelled")
+        self.assertIn("oracle", state["commands"][receipt["command_id"]]["error"])
 
     def test_redesign_allows_changes_to_unrelated_task_files(self):
         from engine.actions import prepare_execution, run_action
@@ -327,13 +308,13 @@ print('measured trials finished')
             self.assertEqual(
                 cli_main(
                     base
-                    + ["auto-iterate", "set-one", "task-one", "--request-id", "pipeline", "--wait"]
+                    + ["command", "set-one", "task-one", "one-shot", "--request-id", "pipeline", "--wait"]
                 ),
                 0,
             )
             self.assertEqual(
                 cli_main(
-                    base + ["auto-iterate", "set-one", "task-one", "--request-id", "pipeline"]
+                    base + ["command", "set-one", "task-one", "one-shot", "--request-id", "pipeline"]
                 ),
                 0,
             )

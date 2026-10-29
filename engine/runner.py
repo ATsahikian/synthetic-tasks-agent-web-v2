@@ -61,18 +61,21 @@ def read_output(root, key, action_id, after, *, final=False):
 def action_configuration(engine, key, action):
     root = Path(engine.catalog["tasks_root"])
     captured = copy.deepcopy(action)
+    if action.get("command_id"):
+        captured = {name: captured[name] for name in ("action_id", "name", "parameters")}
     captured.update({"task_set": key[0], "task": key[1]})
-    return {
-        "schema_version": 1,
+    config = {
+        "schema_version": 2 if action.get("command_id") else 1,
         "action": captured,
         "execution": copy.deepcopy(action["execution"]),
         "task_path": str(root.joinpath(*key)),
         "job_path": str(job_directory(root, key, action["action_id"])),
-        "dependency_results": {
-            name: copy.deepcopy(engine._states[key]["actions"][action_id]["result"])
-            for name, action_id in action["dependency_actions"].items()
-        },
     }
+    if not action.get("command_id"):
+        from .commands.legacy import capture_results
+
+        config = capture_results(config, engine._states[key])
+    return config
 
 
 class ActionRunner:
@@ -175,8 +178,7 @@ class ActionRunner:
                 **result,
             },
         )
-        if key in self.engine._discovered:
-            self.engine._start_ready(key)
+        self.engine._start_ready(key)
 
     def _monitor(self):
         while not self.stop.wait(0.2):

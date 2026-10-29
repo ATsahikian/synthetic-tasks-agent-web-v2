@@ -45,28 +45,28 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:4181")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("health", "tasks", "actions"):
+    for name in ("health", "tasks", "actions", "commands"):
         commands.add_parser(name)
-    for name in ("state", "events", "output", "run", "cancel", "auto-iterate"):
+    for name in ("state", "events", "output", "run", "command", "cancel", "cancel-command"):
         sub = commands.add_parser(name)
         sub.add_argument("task_set")
         sub.add_argument("task")
-        if name in ("output", "cancel"):
-            sub.add_argument("action_id")
-        if name == "run":
-            sub.add_argument("action")
+        if name in ("output", "cancel", "cancel-command"):
+            sub.add_argument("command_id" if name == "cancel-command" else "action_id")
+        if name in ("run", "command"):
+            sub.add_argument("action" if name == "run" else "command_name")
         if name in ("events", "output"):
             sub.add_argument("--after", type=int, default=0)
-        if name in ("run", "cancel", "auto-iterate"):
+        if name in ("run", "command", "cancel", "cancel-command"):
             sub.add_argument("--request-id", default=None)
-        if name in ("run", "auto-iterate"):
+        if name in ("run", "command"):
             sub.add_argument("--agent", choices=["codex", "claude", "muse"])
             sub.add_argument("--prompt")
             sub.add_argument("--parameters", type=json_object, default={})
             sub.add_argument("--wait", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.command in ("health", "tasks", "actions"):
+        if args.command in ("health", "tasks", "actions", "commands"):
             path = "/health" if args.command == "health" else f"/api/{args.command}"
             result = request(args.url, path)
         else:
@@ -80,13 +80,13 @@ def main(argv=None):
                 if args.command != "state":
                     suffix += f"?after={args.after}"
                 result = request(args.url, path + suffix)
-            elif args.command == "cancel":
+            elif args.command in ("cancel", "cancel-command"):
                 result = request(
                     args.url,
                     path + "/cancellations",
                     {
                         "request_id": args.request_id or str(uuid.uuid4()),
-                        "action_id": args.action_id,
+                        ("action_id" if args.command == "cancel" else "command_id"): (args.action_id if args.command == "cancel" else args.command_id),
                     },
                 )
             else:
@@ -96,49 +96,32 @@ def main(argv=None):
                 if args.prompt:
                     parameters["prompt"] = args.prompt
                 request_id = args.request_id or str(uuid.uuid4())
-                if args.command == "auto-iterate":
-                    # The configured dependencies determine the workflow order.
-                    if len(request_id) > 100:
-                        raise RuntimeError(
-                            "auto-iterate request IDs must be at most 100 characters."
-                        )
-                    if set(parameters) - {"agent", "prompt"}:
-                        raise RuntimeError("auto-iterate accepts only agent and prompt parameters.")
-                    receipts = []
-                    for action in (
-                        "redesign",
-                        "commit_desing",
-                        "impl",
-                        "commit_impl",
-                        "local_bench",
-                        "local_bench_analyze",
-                        "export_to_codimango",
-                    ):
-                        body = {
-                            "request_id": f"{request_id}:{action}",
-                            "action": action,
-                            "parameters": (
-                                parameters
-                                if action in ("redesign", "impl", "local_bench_analyze")
-                                else {}
-                            ),
-                        }
-                        receipts.append(request(args.url, path + "/commands", body))
-                    result = {"request_id": request_id, "actions": receipts}
+                if args.command == "run":
+                    body = {"request_id": request_id, "command": "one-action", "parameters": {
+                        "action": args.action, "action_parameters": parameters,
+                    }}
                 else:
-                    result = request(
-                        args.url,
-                        path + "/commands",
-                        {"request_id": request_id, "action": args.action, "parameters": parameters},
-                    )
+                    body = {"request_id": request_id, "command": args.command_name, "parameters": parameters}
+                result = request(args.url, path + "/commands", body)
                 print(json.dumps(result, indent=2), flush=True)
-                if result.get("type") == "completed":
+                if result.get("type") in ("completed", "command_completed"):
                     return 0 if result["outcome"] == "succeeded" else 1
                 if not args.wait:
                     return 0
-                pending = {item["action_id"] for item in result.get("actions", [result])}
+                pending = set() if result.get("command_id") else {result["action_id"]}
                 while True:
                     state = request(args.url, path + "/state")
+                    if result.get("command_id"):
+                        command = state["commands"][result["command_id"]]
+                        if command["status"] == "completed":
+                            print(json.dumps({
+                                "task_set": args.task_set, "task": args.task,
+                                "command_id": command["command_id"], "type": "command_completed",
+                                **{key: command[key] for key in ("outcome", "result", "error", "failed_action_id")},
+                            }, indent=2))
+                            return 0 if command["outcome"] == "succeeded" else 1
+                        time.sleep(0.5)
+                        continue
                     actions = [state["actions"][action_id] for action_id in pending]
                     failures = [
                         action

@@ -10,7 +10,6 @@ from ..errors import EngineError
 NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 REQUEST_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 DEFINITION_FIELDS = {
-    "dependencies",
     "label",
     "description",
     "execution_type",
@@ -67,18 +66,10 @@ def load_actions(file):
         validate_name(name)
         if (
             not isinstance(definition, dict)
-            or "dependencies" not in definition
             or "handler" not in definition
             or set(definition) - DEFINITION_FIELDS
         ):
-            raise EngineError(f"Action {name} needs dependencies and an action class handler.")
-        dependencies = definition["dependencies"]
-        if not isinstance(dependencies, list):
-            raise EngineError(f"Action {name} needs a dependencies array.")
-        for dependency in dependencies:
-            validate_name(dependency)
-        if len(set(dependencies)) != len(dependencies):
-            raise EngineError(f"Action {name} repeats a dependency.")
+            raise EngineError(f"Action {name} needs an action class handler and no workflow dependencies.")
         for field in ("label", "description"):
             if field in definition and not isinstance(definition[field], str):
                 raise EngineError(f"Action {name} {field} must be text.")
@@ -96,21 +87,4 @@ def load_actions(file):
             raise EngineError(f"Action {name} requires mode {mode} for its handler.")
         actions[name]["mode"] = mode
 
-    visiting, visited = set(), set()
-
-    def visit(name):
-        if name in visiting:
-            raise EngineError(f"Action dependencies contain a cycle at {name}.")
-        if name in visited:
-            return
-        visiting.add(name)
-        for dependency in actions[name]["dependencies"]:
-            if dependency not in actions:
-                raise EngineError(f"Action {name} has unknown dependency {dependency}.")
-            visit(dependency)
-        visiting.remove(name)
-        visited.add(name)
-
-    for name in actions:
-        visit(name)
     return actions

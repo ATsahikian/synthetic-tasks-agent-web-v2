@@ -9,17 +9,15 @@ from ..storage import atomic_json_write
 
 class action_local_bench_analyze(AgentActionHandler):
     name = "local_bench_analyze"
-    parameters = frozenset({"agent", "prompt"})
+    parameters = frozenset({"agent", "prompt", "source", "source_id"})
+    required_parameters = frozenset({"source", "source_id"})
 
     def run(self, config, execute, output_path):
         action = config["action"]
         task_path, job_path = Path(config["task_path"]), Path(config["job_path"])
         design_path, template_path = task_path / "design.md", task_path.parent / "template.md"
         context = self.context(config)
-        benchmark_name = (
-            "local_bench" if "local_bench" in config["dependency_results"] else "benchmark"
-        )
-        benchmark = config["dependency_results"].get(benchmark_name, {})
+        benchmark = action["parameters"]["source"]
         if benchmark.get("design_sha256") != digest(design_path) or benchmark.get(
             "template_sha256"
         ) != digest(template_path):
@@ -35,7 +33,7 @@ class action_local_bench_analyze(AgentActionHandler):
         report = job_path / "analysis.md"
         manifest = {
             "provider": "local_benchmark",
-            "benchmark_action_id": action["dependency_actions"][benchmark_name],
+            "benchmark_action_id": action["parameters"]["source_id"],
             "benchmark": benchmark,
             "artifact_sha256": artifact_hashes,
         }
