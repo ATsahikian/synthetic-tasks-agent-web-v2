@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import cast
@@ -101,10 +102,66 @@ def read_document(file: PathLike) -> str:
     path = Path(file)
     if path.is_symlink() or not path.is_file():
         raise RuntimeError(f"Required document must be a regular file: {file}")
-    value = path.read_text("utf-8")
+    try:
+        value = path.read_text("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError(f"Cannot read required document {file}: {error}") from error
     if not value.strip():
         raise RuntimeError(f"Required document is empty: {file}")
     return value
+
+
+def task_guidance(task: Path, name: str, default: str) -> tuple[Path | None, str]:
+    """Select only this action's guide; an invalid local file never falls back."""
+    path = task.parent / name
+    if not os.path.lexists(path):
+        return None, default
+    return path, read_document(path)
+
+
+def check_guidance(path: Path | None, content: str) -> None:
+    if path is not None and read_document(path) != content:
+        raise RuntimeError(f"Task guidance changed during the action: {path}")
+
+
+def implementation_digest(task: Path) -> str:
+    """Capture task files and modes, including untracked files and empty directories."""
+    from ..git_worker.transactions import LOCAL_OMITTED, file_manifest
+
+    paths: list[str] = []
+    directories: list[str] = []
+    for directory, children, files in os.walk(task, followlinks=False):
+        children[:] = sorted(name for name in children if name not in LOCAL_OMITTED)
+        for name in [*children, *files]:
+            path = Path(directory) / name
+            relative = path.relative_to(task).as_posix()
+            if name in LOCAL_OMITTED or relative == "writeup.md":
+                continue
+            if path.is_dir() and not path.is_symlink():
+                directories.append(relative)
+            else:
+                paths.append(relative)
+    manifest = {
+        "files": file_manifest(task, sorted(paths)),
+        "directories": sorted(directories),
+    }
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
+
+
+def require_implementation(config: ActionConfig) -> JsonObject:
+    design_sources(Path(config["task_path"]))
+    source = require_source(config, approved=True, oracle=True)
+    if not isinstance(source.get("commit"), str) or not source["commit"]:
+        raise RuntimeError(
+            "Source from commit_impl with an implementation commit is required."
+        )
+    if source.get("implementation_sha256") != implementation_digest(
+        Path(config["task_path"])
+    ):
+        raise RuntimeError(
+            "Implementation sources changed; rerun implementation and commit_impl."
+        )
+    return source
 
 
 def agent_command(

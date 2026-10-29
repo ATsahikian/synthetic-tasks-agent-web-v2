@@ -7,7 +7,7 @@ and executes them in sequence. Every new action execution belongs to a command.
 ## Run
 
 Python 3.12 on Linux is required. There are no third-party Python dependencies.
-Design commits and exports also require Git.
+Commit actions and exports also require Git.
 
 From the repository root:
 
@@ -45,6 +45,8 @@ Codimango. Other benchmark agents do not require the MetaCode cache.
 synthetic-tasks-project-v2/
   set-one/
     template.md
+    impl-guidance.md            # optional implementation guide
+    writeup-guidance.md         # optional writeup guide
     instruction.md              # optional shared instructions
     task-one/
       design.md
@@ -79,6 +81,8 @@ data and execute their job without looking up prerequisite actions or task histo
 | `commit_desing` | Required `source`: design result with design/template hashes |
 | `impl` | Required `source`: approved design result; optional `prompt`, `reference_task` |
 | `commit_impl` | Required `source`: implementation result with a passing oracle |
+| `write_up` | Required `source`: result from `commit_impl`; optional `prompt` |
+| `commit_write_up` | Required `source`: result from `write_up` |
 | `local_bench` | Required `source`: approved implementation result; optional `model`, `benchmark_agent`, `attempts`, `concurrency`, `timeout_multiplier`, `agent_timeout_multiplier` |
 | `local_bench_analyze` | Required `source`: completed benchmark result containing saved trials/trajectories; required `source_id`: benchmark action ID; optional `prompt` |
 | `export_to_codimango` | Required `source`: implementation result with a passing oracle and design/template hashes |
@@ -90,7 +94,7 @@ Data guards still check hashes, approvals, oracle outcomes, and evidence files.
 The design approval action retains its existing spelling, `commit_desing`.
 
 Every action emits `started`, executes outside the engine lock, then emits
-`completed` with its result or error. `commit_desing`, `commit_impl`, and
+`completed` with its result or error. `commit_desing`, `commit_impl`, `commit_write_up`, and
 `export_to_codimango` use one dedicated `git-worker` thread and a shared durable FIFO
 queue; other actions use detached workers.
 
@@ -112,7 +116,8 @@ worker launch code remain in their existing modules.
 The local workflow stops after trajectory analysis:
 
 ```text
-redesign → commit_desing → impl → commit_impl → local_bench → local_bench_analyze
+redesign → commit_desing → impl → commit_impl
+→ write_up → commit_write_up → local_bench → local_bench_analyze
 ```
 
 `command.json` stores the ordered steps, their dependencies, and parameter bindings.
@@ -145,6 +150,7 @@ bindings take precedence over caller values.
   "parameters": {
     "prompt": "Revise this task",
     "action_parameters": {
+      "write_up": {"prompt": "Keep the writeup concise and grounded in the task"},
       "local_bench": {"attempts": 2, "concurrency": 2}
     }
   }
@@ -172,6 +178,69 @@ dependencies, or execute prerequisites.
 `action_parameters` defaults to `{}`. Unknown parameters and missing required
 parameters are rejected according to the selected handler's contract. Internal
 handler and runner settings come from `actions.json`.
+
+### Independent task set guides
+
+| Action | Local task set file | Missing file fallback |
+| --- | --- | --- |
+| `impl` | `impl-guidance.md` | `skills/impl-guidance.md` |
+| `write_up` | `writeup-guidance.md` | `skills/writeup-guidance.md` |
+
+Before editing, each action reads its entire corresponding local guide, beside
+`template.md`, and embeds it in the agent prompt. It independently uses its own
+bundled generic guide if the local file is absent. Present but unreadable, empty,
+or symlinked guides fail clearly. Guides are read-only and changes are rejected.
+Implementation guidance governs implementation, required delegations, validation,
+and oracle repair. Writeup guidance governs only writeup structure and style.
+Each action consumes only its own guide. Cyber Bench authoring restrictions apply
+alongside either guide. The v2 ELF task set contains the v1 ELF rules and writeup
+format, with example references pointing to their original v1 locations.
+
+`impl` retains first-party Muse instruction delegation and oracle repair. It leaves
+`writeup.md` unchanged. `write_up` starts a fresh `muse exec --provider meta`
+invocation using the captured `MUSE_BIN`, with up to three rate-limit attempts.
+It validates approval, the passing oracle, current design/template hashes, and
+`implementation_sha256` from `commit_impl`. Muse reads task facts and the selected
+writeup guide and writes directly to `writeup.md`. Only that file may change;
+missing, empty, symlinked, or unsuccessful output fails the action. A successful
+agent emits `SYNTHETIC_RESULT={"writeup_generated":true}`. The result inherits
+implementation fields and adds `writeup_generated` and `writeup_sha256`.
+Generated writeups include a human-review notice. The requested workflow commits
+them locally before benchmarking; human review is still needed.
+
+For `one-action`, supply the full `commit_impl` result as `source` to `write_up`.
+Then supply the full `write_up` result as `source` to `commit_write_up`:
+
+```json
+{
+  "request_id": "debug-writeup-commit",
+  "command": "one-action",
+  "parameters": {
+    "action": "commit_write_up",
+    "action_parameters": {
+      "source": {
+        "approved": true,
+        "oracle_passed": true,
+        "design_sha256": "<current design hash>",
+        "template_sha256": "<current template hash>",
+        "implementation_sha256": "<implementation fingerprint from commit_impl>",
+        "repo_path": "/path/to/task/project",
+        "commit": "<implementation commit>",
+        "committed": true,
+        "writeup_generated": true,
+        "writeup_sha256": "<generated writeup hash>"
+      }
+    }
+  }
+}
+```
+
+`commit_write_up` checks the writeup hash again and commits only `writeup.md`
+through the serialized, recoverable Git worker. It retains implementation metadata
+and adds `writeup_commit` and `writeup_committed`. Identical content succeeds
+without another commit. Failures stop the chain before benchmarking. Already
+accepted commands retain their saved chains and execution settings; newly accepted
+`one-shot` commands use all eight steps.
 
 ### Scheduling and failure handling
 
@@ -214,6 +283,9 @@ Detection covers cybersecurity flagging and Trusted Access for Cyber messages;
 rate-limit reached/exceeded, Too Many Requests, HTTP 429, and RESOURCE_EXHAUSTED.
 Terminal CLI error results are failures even if the process exits with code zero.
 Successful invocations containing intermediate retry messages remain successful.
+`write_up` always uses Muse; it has the same delayed rate-limit retries and no
+model fallback.
+
 Launch failures, interrupted workers, timeouts, and handler source/output validation
 failures are terminal and retain process and pool cleanup.
 
@@ -405,9 +477,11 @@ with that lock. Agent invocations are instructed to leave Git mutations to the e
 
 `commit_desing` commits only `design.md`. `commit_impl` commits added, modified, and
 deleted files within the selected task directory, respecting Git ignore rules for
-untracked files and excluding `.review`, `.remote`, `.git`, and `__pycache__`.
+untracked files and excluding `writeup.md`, `.review`, `.remote`, `.git`, and `__pycache__`.
 It requires a passing oracle and unchanged design/template hashes. Its result retains
-the approval/source fields and adds `repo_path`, `task_path`, `commit`, and `committed`.
+the approval/source fields and adds `repo_path`, `task_path`, `commit`, `committed`,
+and `implementation_sha256`. `commit_write_up` commits only `writeup.md` and
+preserves these implementation fields.
 Unchanged content reuses the latest relevant commit with `committed: false`.
 Commits use explicit paths and preserve unrelated staged files.
 

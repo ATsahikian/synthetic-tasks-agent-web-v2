@@ -48,13 +48,37 @@
           }
         },
         {
-          "action": "local_bench",
+          "action": "write_up",
           "dependencies": [
             "commit_impl"
           ],
           "parameter_bindings": {
             "source": {
               "step": "commit_impl",
+              "value": "result"
+            }
+          }
+        },
+        {
+          "action": "commit_write_up",
+          "dependencies": [
+            "write_up"
+          ],
+          "parameter_bindings": {
+            "source": {
+              "step": "write_up",
+              "value": "result"
+            }
+          }
+        },
+        {
+          "action": "local_bench",
+          "dependencies": [
+            "commit_write_up"
+          ],
+          "parameter_bindings": {
+            "source": {
+              "step": "commit_write_up",
               "value": "result"
             }
           }

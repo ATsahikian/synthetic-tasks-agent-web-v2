@@ -60,6 +60,7 @@ class ExecutionSpec(CommandOptions, total=False):
     templates_path: str
     guide: str
     skill: str
+    task_guide_default: str
     codimango_bin: str
     repo_path: str
 

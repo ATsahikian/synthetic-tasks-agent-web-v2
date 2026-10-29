@@ -52,13 +52,16 @@ class WorkflowTests(WorkerFixture):
             + r"""
 import json, re, sys
 from pathlib import Path
-prompt = sys.stdin.read()
+prompt = sys.argv[-1] if '--workspace' in sys.argv else sys.stdin.read()
 if 'design.candidate.md' in prompt:
     candidate = Path(re.search(r'Write only (.*?/design.candidate.md)\.', prompt)[1])
     candidate.write_text('# Redesigned fixture\n')
 elif '# Implement One Task and Pass Its Oracle' in prompt:
     result = 'SYNTHETIC_RESULT={"oracle_passed":true}'
     print(json.dumps({'type':'result','result':result}) if 'stream-json' in sys.argv else result)
+elif '<writeup-guidance>' in prompt:
+    (Path.cwd() / 'writeup.md').write_text('# Writeup: Fixture\nHuman review is needed.\n')
+    print('SYNTHETIC_RESULT={"writeup_generated":true}')
 elif 'analysis.source.json' in prompt:
     report = Path(re.search(r'Write only (.*?/analysis.md)\.', prompt)[1])
     manifest = json.loads((report.parent / 'analysis.source.json').read_text())
@@ -101,6 +104,7 @@ print('measured trials finished')
                 "CYBER_BENCH_GUIDE_PATH": str(guide),
                 "CODEX_BIN": str(agent),
                 "CLAUDE_BIN": str(agent),
+                "MUSE_BIN": str(agent),
                 "CODIMANGO_BIN": str(codimango),
                 "CODIMANGO_REPO_ROOT": str(self.export_root),
                 "SYNTHETIC_METACODE_CACHE_SOURCE": str(cache_source),
@@ -130,13 +134,24 @@ print('measured trials finished')
         )
         command = engine.state("set-one", "task-one")["commands"][receipt["command_id"]]
         ids = {step["action"]: step["action_id"] for step in command["steps"]}
-        redesign, design_commit, implement, commit, benchmark, analyze = [
+        (
+            redesign,
+            design_commit,
+            implement,
+            commit,
+            writeup,
+            writeup_commit,
+            benchmark,
+            analyze,
+        ) = [
             ids[name]
             for name in (
                 "redesign",
                 "commit_desing",
                 "impl",
                 "commit_impl",
+                "write_up",
+                "commit_write_up",
                 "local_bench",
                 "local_bench_analyze",
             )
@@ -154,7 +169,7 @@ print('measured trials finished')
             state["actions"][redesign]["result"],
         )
         self.assertEqual(
-            object_value(state["actions"][commit]["result"])["commit"],
+            object_value(state["actions"][writeup_commit]["result"])["writeup_commit"],
             git(self.root, "rev-parse", "HEAD"),
         )
         self.assertEqual(
@@ -179,7 +194,7 @@ print('measured trials finished')
         )
         self.assertEqual(
             state["actions"][benchmark]["parameters"]["source"],
-            state["actions"][commit]["result"],
+            state["actions"][writeup_commit]["result"],
         )
         self.assertEqual(
             object_value(state["actions"][benchmark]["result"])["passed"], 1
@@ -206,6 +221,8 @@ print('measured trials finished')
                     design_commit,
                     implement,
                     commit,
+                    writeup,
+                    writeup_commit,
                     benchmark,
                     analyze,
                 )
@@ -268,6 +285,8 @@ print('measured trials finished')
                 "commit-desing",
                 "implement",
                 "commit-impl",
+                "write_up",
+                "commit_write_up",
                 "local_bench",
                 "local_bench_analyze",
             },
@@ -325,6 +344,7 @@ print('measured trials finished')
                     },
                 },
                 "commit_impl": definitions["commit_impl"],
+                "write_up": definitions["write_up"],
                 "local_bench": definitions["local_bench"],
                 "export_to_codimango": definitions["export_to_codimango"],
             }

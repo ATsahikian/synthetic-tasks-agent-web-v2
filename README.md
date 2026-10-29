@@ -7,9 +7,20 @@ chains with durable events, a persistent action pool, a serialized Git worker,
 detached workers, and restart recovery. Actions are function-like jobs with one parameter object. `one-shot` runs
 through trajectory analysis; `one-action` executes a caller-supplied debugging call.
 
-New agent actions start with Codex and recover automatically through Opus 4.8
+Redesign, implementation, analysis, custom, and troubleshooting actions start with Codex and recover automatically through Opus 4.8
 with 200k context, then Muse. Each attempt and retry schedule is recorded in events;
 delayed retries survive restarts and block later steps for the same task.
+Writeup generation always uses first-party Muse and retains its rate-limit retries.
+
+New `one-shot` submissions run eight steps:
+
+```text
+redesign → commit_desing → impl → commit_impl
+→ write_up → commit_write_up → local_bench → local_bench_analyze
+```
+
+Implementation and writeup actions independently select their task set guides,
+`impl-guidance.md` and `writeup-guidance.md`, or their own bundled generic defaults.
 
 ## Project layout
 

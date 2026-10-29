@@ -25,6 +25,18 @@
       "execution_type": "script",
       "handler": "action_commit_impl"
     },
+    "write_up": {
+      "label": "Writeup",
+      "description": "Generate writeup.md with first-party Muse using the selected writeup guide.",
+      "execution_type": "agent",
+      "handler": "action_write_up"
+    },
+    "commit_write_up": {
+      "label": "Commit writeup",
+      "description": "Commit only the validated generated writeup.md.",
+      "execution_type": "script",
+      "handler": "action_commit_write_up"
+    },
     "local_bench": {
       "label": "Local benchmark",
       "description": "Run Codimango trials and retain their measured results.",

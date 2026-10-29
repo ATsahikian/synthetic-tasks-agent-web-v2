@@ -340,7 +340,7 @@ def commit_task(
     *,
     design: bool = False,
 ) -> JsonObject:
-    from ..actions.common import design_sources, require_source
+    from ..actions.common import design_sources, implementation_digest, require_source
 
     task = Path(config["task_path"]).resolve()
     if design:
@@ -372,6 +372,7 @@ def commit_task(
             ).stdout.split("\x00")
             if name
             and not (set(Path(name).relative_to(relative).parts) & LOCAL_OMITTED)
+            and Path(name).relative_to(relative).as_posix() != "writeup.md"
         ]
 
     with lock(common_directory(root) / "git-worker.lock"):
@@ -384,6 +385,12 @@ def commit_task(
 
         def validate() -> None:
             require_source(config, oracle=not design)
+            if (
+                not design
+                and "implementation_sha256" in approval
+                and approval["implementation_sha256"] != implementation_digest(task)
+            ):
+                raise RuntimeError("Implementation sources changed before approval.")
             if not design and set(implementation_paths()) - set(paths):
                 raise RuntimeError(
                     "New task files appeared during the Git transaction."
@@ -408,6 +415,9 @@ def commit_task(
         **(
             {"design_path": relative + "/design.md"}
             if design
-            else {"task_path": str(task)}
+            else {
+                "task_path": str(task),
+                "implementation_sha256": implementation_digest(task),
+            }
         ),
     }
