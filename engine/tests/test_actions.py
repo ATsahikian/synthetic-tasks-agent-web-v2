@@ -4,9 +4,8 @@ import json
 import sys
 from unittest import mock
 
-from engine.actions import load_actions, run_action
-from engine.actions.action_commit_desing import action_commit_desing
-from engine.actions.common import design_sources
+from engine.actions import load_actions
+from engine.tests.support import action_test_sync, install_sync_handler
 from engine.cli import main as cli_main
 from engine.errors import EngineError
 from engine.tests.support import HistoricalEngineFixture as EngineFixture
@@ -21,11 +20,12 @@ class ActionTests(EngineFixture):
     def setUp(self):
         super().setUp()
         self.addCleanup(self.clean_workers)
-        # Control the sync result for lifecycle tests; Git commits are covered separately.
-        sync_run = mock.patch.object(action_commit_desing, "run", return_value={"approved": True})
+        install_sync_handler(self)
+        # Generic sync lifecycle tests use a test-only handler.
+        sync_run = mock.patch.object(action_test_sync, "run", return_value={"approved": True})
         sync_run.start()
         self.addCleanup(sync_run.stop)
-        self.approval = {"dependencies": [], "handler": "action_commit_desing"}
+        self.approval = {"dependencies": [], "handler": "action_test_sync"}
         self.set_actions({"approve": self.approval})
 
     def test_sync_completion_contains_result_and_retries_replay_without_execution(self):
@@ -42,7 +42,7 @@ class ActionTests(EngineFixture):
         self.assertEqual(engine.output("set-one", "task-one", receipt["action_id"])["output"], "")
         engine.close()
         restored = self.make_engine()
-        with mock.patch.object(action_commit_desing, "run", side_effect=AssertionError("reran")):
+        with mock.patch.object(action_test_sync, "run", side_effect=AssertionError("reran")):
             self.assertEqual(self.command(restored, "approve", request_id="sync-once"), receipt)
         self.assertEqual(restored.state("set-one", "task-one"), state)
         with self.assertRaises(EngineError) as caught:
@@ -52,7 +52,7 @@ class ActionTests(EngineFixture):
     def test_sync_failure_is_a_single_completion_and_retry_can_unblock_dependents(self):
         self.set_actions({"approve": self.approval, "process": {"dependencies": ["approve"]}})
         engine = self.make_engine()
-        with mock.patch.object(action_commit_desing, "run", side_effect=RuntimeError("approval failed")):
+        with mock.patch.object(action_test_sync, "run", side_effect=RuntimeError("approval failed")):
             receipt = self.command(engine, "approve")
         self.assertEqual((receipt["type"], receipt["outcome"]), ("completed", "failed"))
         self.assertIsNone(receipt["result"])
@@ -84,7 +84,7 @@ class ActionTests(EngineFixture):
         state = restored.state("set-one", "task-one")
         approval_state = state["actions"][receipt["action_id"]]
         self.assertEqual(approval_state["outcome"], "succeeded")
-        self.assertEqual(approval_state["execution"]["handler"], "action_commit_desing")
+        self.assertEqual(approval_state["execution"]["handler"], "action_test_sync")
         self.assertTrue(approval_state["result"]["approved"])
         self.assertIsNone(approval_state["started_at"])
         self.assertEqual(approval_state["dependency_actions"], {"prepare": prepare})
@@ -106,7 +106,7 @@ class ActionTests(EngineFixture):
                 self.command(engine, "approve", request_id="uncertain-sync")
         engine.close()
         restored = self.make_engine()
-        with mock.patch.object(action_commit_desing, "run", side_effect=AssertionError("reran")):
+        with mock.patch.object(action_test_sync, "run", side_effect=AssertionError("reran")):
             receipt = self.command(restored, "approve", request_id="uncertain-sync")
         self.assertTrue(receipt["result"]["approved"])
         self.assertEqual(restored.state("set-one", "task-one")["revision"], 1)
@@ -128,20 +128,6 @@ class ActionTests(EngineFixture):
                 self.assertEqual([event["type"] for event in events], ["waiting", "started", "completed"])
                 self.assertEqual(events[0]["payload"].get("mode"), mode)
                 restored.close()
-
-    def test_implementation_approval_executes_without_external_commands(self):
-        config = {
-            "task_path": str(self.task_directory),
-            "action": {"parameters": {"source": {**design_sources(self.task_directory), "oracle_passed": True}}},
-            "execution": {"handler": "action_commit_impl"},
-        }
-
-        def execute(_):
-            self.fail("Implementation approval must not launch external commands.")
-
-        result = run_action(config, execute, self.base / "output.log")
-        self.assertTrue(result["approved"])
-        self.assertTrue(result["oracle_passed"])
 
     def test_async_action_emits_start_then_completion_with_result_or_error(self):
         for code, outcome in ((0, "succeeded"), (7, "failed")):
@@ -203,7 +189,7 @@ class ActionTests(EngineFixture):
             load_actions(self.config)
 
     def test_config_rejects_invalid_handler_references(self):
-        for handler in (None, [], "commit_desing", "action_missing", "../action_commit_desing"):
+        for handler in (None, [], "commit_desing", "action_missing", "../action_test_sync"):
             with self.subTest(handler=handler):
                 self.set_actions({"approve": {**self.approval, "handler": handler}})
                 with self.assertRaises(EngineError):
@@ -211,7 +197,7 @@ class ActionTests(EngineFixture):
 
     def test_config_rejects_invalid_handler_settings(self):
         for handler, runner in (
-            ("action_commit_desing", {"argv": ["python3"]}),
+            ("action_test_sync", {"argv": ["python3"]}),
             ("action_command", {}),
             ("action_command", {"argv": ["python3"], "timeout_ms": False}),
             ("action_export_to_codimango", {}),

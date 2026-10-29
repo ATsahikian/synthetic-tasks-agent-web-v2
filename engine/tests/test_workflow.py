@@ -101,7 +101,8 @@ print('measured trials finished')
         self.assertEqual((self.task_directory / "design.md").read_text(), "# Redesigned fixture\n")
         self.assertTrue(state["actions"][implement]["result"]["oracle_passed"])
         self.assertEqual(state["actions"][design_commit]["parameters"]["source"], state["actions"][redesign]["result"])
-        self.assertEqual(state["actions"][design_commit]["result"]["commit"], git(self.root, "rev-parse", "HEAD"))
+        self.assertEqual(state["actions"][commit]["result"]["commit"], git(self.root, "rev-parse", "HEAD"))
+        self.assertEqual(git(self.root, "show", state["actions"][design_commit]["result"]["commit"] + ":set-one/task-one/design.md"), "# Redesigned fixture")
         self.assertEqual(state["actions"][implement]["parameters"]["source"], state["actions"][design_commit]["result"])
         self.assertTrue(state["actions"][commit]["result"]["approved"])
         self.assertEqual(state["actions"][commit]["parameters"]["source"], state["actions"][implement]["result"])
@@ -129,7 +130,7 @@ print('measured trials finished')
         self.assertEqual(self.finished(engine, redesign)["outcome"], "succeeded")
         redesign_result = engine.state("set-one", "task-one")["actions"][redesign]["result"]
         design_commit = self.command(engine, "commit_desing", parameters={"source": redesign_result})
-        approval = engine.state("set-one", "task-one")["actions"][design_commit["action_id"]]["result"]
+        approval = self.finished(engine, design_commit["action_id"])["result"]
         (self.task_directory / "design.md").write_text("# Updated design")
         implement = self.command(engine, "impl", parameters={"source": approval})["action_id"]
         result = self.finished(engine, implement)

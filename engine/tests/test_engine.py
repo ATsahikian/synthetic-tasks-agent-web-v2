@@ -484,7 +484,7 @@ class EngineTests(EngineFixture):
             "schema_version": 1, "tasks_root": str(self.root.resolve()), "task_set": "set-one",
         })
         self.assertEqual(json.loads((self.review / "job.json").read_text("utf-8")), engine.state("set-one", "task-one"))
-        self.assertFalse((self.root / ".review").exists())
+        self.assertTrue((self.root / ".review" / "git-worker.lock").is_file())
 
     def test_project_move_keeps_history_and_refreshes_workspace_metadata(self):
         engine = self.make_engine()

@@ -30,6 +30,8 @@ def prepare_execution(definition, parameters):
     handler = handler_for(definition["handler"])
     spec = handler.prepare(definition.get("runner", {}), parameters)
     spec["handler"] = definition["handler"]
+    if getattr(handler, "executor", None):
+        spec["executor"] = handler.executor
     return spec
 
 

@@ -79,10 +79,11 @@ The design approval action retains its existing spelling, `commit_desing`.
 | Mode | Execution |
 | --- | --- |
 | `sync` | Runs inline and emits one `completed` event with its result/error |
-| `async` | Emits `started`, launches a detached worker, then emits `completed` |
+| `async` | Emits `started`, executes outside the engine lock, then emits `completed` |
 
-`commit_desing` and `commit_impl` are synchronous; the remaining built-in actions
-are asynchronous. Handler mode and configured mode must match. Historical actions
+All built-in actions are asynchronous. `commit_desing`, `commit_impl`, and
+`export_to_codimango` use one dedicated `git-worker` thread and a shared durable FIFO
+queue; other actions use detached workers. Handler mode and configured mode must match. Historical actions
 without a mode, or with `mode: durable`, retain their asynchronous lifecycle.
 
 The `action_command` handler executes configured argv arrays. Its internal runner
@@ -326,17 +327,62 @@ relationships, allowing older dependent results to become stale after a newer
 successful producer execution. `one-action` never uses that history to build a call.
 
 Restart resumes pending commands, completes interrupted failure cleanup, and writes
-missing command completion events. Live asynchronous workers are reconnected; saved
-results are applied once. A dead worker without a result is marked failed and its
-remaining processes are cleaned up. Started asynchronous actions are never automatically
-relaunched. Unfinished synchronous steps can run again after a crash; the built-in
-commit handlers retain their repeat-safe behavior.
+missing command completion events. Live detached workers are reconnected; saved
+results are applied once. A dead detached worker without a result is marked failed
+and its remaining processes are cleaned up. Those actions are not automatically
+relaunched. Historical synchronous completed-only events remain replayable.
 
-Workers remain detached when the server stops. Their output is synced before an
-atomic `result.json` is saved. Worker locks prevent duplicate execution within a job
-directory. The engine checks results every 200 ms. Cancellation and timeout stop
-owned process groups, with a default one-hour timeout and ten-second termination
-grace period.
+### Git worker
+
+The implementation lives in `git-worker/`: `worker.py` owns the queue,
+`transactions.py` handles scoped commits, and `export.py` handles publishing.
+The folder's `__init__.py` exposes the package API. The engine initializer registers
+the folder as `engine.git_worker` for Python imports.
+
+The engine stores the global queue in `<tasks-root>/.review/git-queue.json` and
+holds `<tasks-root>/.review/git-worker.lock` while running. Queue entries identify
+the task, action ID, FIFO sequence, and execution phase. `execution.executor` is
+captured as `git-worker` when preparing a Git action; callers cannot override it.
+The existing per-task action pool still represents later command steps. An action
+waiting for the Git worker has already emitted `started`.
+
+Only one Git request executes at a time, including an export's fetch and push.
+Git execution does not hold the engine lock, so API reads and other actions remain
+responsive. A repository lock in its Git common directory also coordinates separate
+engine processes that target the same checkout. Independent Git tools must cooperate
+with that lock. Agent invocations are instructed to leave Git mutations to the engine.
+
+`commit_desing` commits only `design.md`. `commit_impl` commits added, modified, and
+deleted files within the selected task directory, respecting Git ignore rules for
+untracked files and excluding `.review`, `.remote`, `.git`, and `__pycache__`.
+It requires a passing oracle and unchanged design/template hashes. Its result retains
+the approval/source fields and adds `repo_path`, `task_path`, `commit`, and `committed`.
+Unchanged content reuses the latest relevant commit with `committed: false`.
+Commits use explicit paths and preserve unrelated staged files.
+
+Each Git job retains `input.json`, `output.log`, `result.json`, and a
+`git-transaction.json` journal. Export additionally retains `export-transaction.json`,
+`export-snapshot/`, `export-previous/`, and `export-commit/git-transaction.json`.
+Journals record the intended content, staging state, commit SHA, and export/push
+progress. Newly created commits include a `Synthetic-Action-ID` trailer. Restart
+restores FIFO order, reconstructs interrupted enqueue records, resumes unexecuted
+requests, and reconciles existing commits or remote content before retrying. Saved
+results produce exactly one completion event. Ambiguous repository changes fail the
+request with a recovery explanation instead of creating another commit.
+
+Cancellation skips waiting Git requests; an active request finishes and reports its
+actual result, then remaining command steps are cancelled. Normal shutdown stops
+admission and further action dispatch, drains accepted Git requests, publishes their
+completions, and joins the worker before releasing engine locks. Later command steps
+resume on restart. Drain time includes accepted exports and their network operations.
+For the initial upgrade, finish old active/queued commands before replacing the engine.
+
+Detached workers remain running when the server stops. Their output is synced before
+an atomic `result.json` is saved. Worker locks prevent duplicate execution within a
+job directory. The engine checks results every 200 ms. Detached-worker cancellation
+and timeout stop owned process groups, with a default one-hour timeout and ten-second
+termination grace period. Active Git requests ignore cancellation; Git commands retain
+their bounded timeouts and interrupted transactions are reconciled on restart.
 
 Stored histories remain readable when a task loses its discovery markers. Existing
 worker results are still reconciled, and remaining queued command work is cancelled

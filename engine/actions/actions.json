@@ -12,7 +12,7 @@
       "label": "Commit design",
       "description": "Commit the redesigned task's design.md and record its approval.",
       "execution_type": "script",
-      "mode": "sync",
+      "mode": "async",
       "handler": "action_commit_desing"
     },
     "impl": {
@@ -24,9 +24,9 @@
     },
     "commit_impl": {
       "label": "Commit implementation",
-      "description": "Record approval of the successful implementation and its passing oracle.",
+      "description": "Commit this task's implementation files and approve its passing oracle.",
       "execution_type": "script",
-      "mode": "sync",
+      "mode": "async",
       "handler": "action_commit_impl"
     },
     "local_bench": {

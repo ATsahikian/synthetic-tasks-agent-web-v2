@@ -1,14 +1,13 @@
 """Implementation approval action handler."""
 
-from .base import SyncActionHandler
-from .common import require_source
+from .base import GitActionHandler
+from ..git_worker.transactions import commit_task
 
 
-class action_commit_impl(SyncActionHandler):
+class action_commit_impl(GitActionHandler):
     name = "commit_impl"
     parameters = frozenset({"source"})
     required_parameters = frozenset({"source"})
 
     def run(self, config, execute, output_path):
-        approval = require_source(config, oracle=True)
-        return {**approval, "approved": True}
+        return commit_task(config, execute)

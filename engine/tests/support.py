@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from types import ModuleType
 from pathlib import Path
 from unittest import mock
 
@@ -15,6 +16,26 @@ from engine.errors import EngineError
 from engine.core import Engine, acknowledgment
 from engine.runner import ActionRunner, job_directory
 from engine.storage import atomic_json_write
+from engine.actions.base import SyncActionHandler
+
+
+class action_test_sync(SyncActionHandler):
+    """A test-only synchronous handler; production Git actions are asynchronous."""
+
+    name = "approve"
+    parameters = frozenset({"source"})
+    required_parameters = frozenset({"source"})
+
+    def run(self, config, execute, output_path):
+        return {"approved": True}
+
+
+def install_sync_handler(test):
+    module = ModuleType("engine.actions.action_test_sync")
+    module.action_test_sync = action_test_sync
+    registration = mock.patch.dict(sys.modules, {module.__name__: module})
+    registration.start()
+    test.addCleanup(registration.stop)
 
 
 def git(directory, *arguments):

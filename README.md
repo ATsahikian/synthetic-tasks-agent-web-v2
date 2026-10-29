@@ -3,14 +3,15 @@
 Repository: https://github.com/ATsahikian/synthetic-tasks-agent-web-v2
 
 This application provides a Python engine where commands execute ordered action
-chains with durable events, a persistent action pool, detached workers, and restart
-recovery. Actions are function-like jobs with one parameter object. `one-shot` runs
+chains with durable events, a persistent action pool, a serialized Git worker,
+detached workers, and restart recovery. Actions are function-like jobs with one parameter object. `one-shot` runs
 through trajectory analysis; `one-action` executes a caller-supplied debugging call.
 
 ## Project layout
 
 - `engine/`: Python engine, action definitions, API documentation, and tests.
 - `engine/actions/`: Independent job handlers, parameter contracts, and internal execution settings.
+- `engine/git-worker/`: Durable Git queue, scoped transactions, and export publishing.
 - `engine/commands/`: Command definitions, handlers, dependency and parameter bindings, scheduling, and recovery.
 - `web/`: Reserved for the future web interface.
 

@@ -85,6 +85,9 @@ class ActionRunner:
         self.stop = threading.Event()
         self.thread = None
         self.children = []
+        from .git_worker import GitWorker
+
+        self.git_worker = GitWorker(self)
 
     def initiate(self, task_set, task, action):
         if not action.get("execution"):
@@ -92,6 +95,11 @@ class ActionRunner:
         key = (task_set, task)
         directory = job_directory(self.root, key, action["action_id"], create=True)
         config = action_configuration(self.engine, key, action)
+        from .git_worker import uses_git_worker
+
+        if uses_git_worker(action):
+            self.git_worker.enqueue(key, action, config)
+            return
         atomic_json_write(directory / "input.json", config)
         child = subprocess.Popen(
             [sys.executable, str(DIRECTORY / "worker.py"), str(directory / "input.json")],
@@ -121,6 +129,11 @@ class ActionRunner:
             raise
 
     def cancel(self, key, action_id):
+        from .git_worker import uses_git_worker
+
+        if uses_git_worker(self.engine._states[key]["actions"][action_id]):
+            self.git_worker.cancel(key, action_id)
+            return
         directory = job_directory(self.root, key, action_id, create=True)
         atomic_json_write(directory / "cancel.json", {"cancel": True})
 
@@ -134,6 +147,10 @@ class ActionRunner:
             and (result.get("error") is None or isinstance(result.get("error"), str))
         ):
             return result
+        from .git_worker import uses_git_worker
+
+        if uses_git_worker(action):
+            return None
         worker = read_json(directory / "worker.json", {}) or read_json(
             directory / "launch.json", {}
         )
@@ -157,6 +174,7 @@ class ActionRunner:
         }
 
     def recover(self):
+        self.git_worker.recover()
         for key, state in list(self.engine._states.items()):
             for action in list(state["actions"].values()):
                 if action["status"] == "started":
@@ -198,13 +216,25 @@ class ActionRunner:
                 LOGGER.exception("Could not reconcile an execution result; retrying")
 
     def start_monitor(self):
+        self.git_worker.start()
         self.thread = threading.Thread(target=self._monitor, name="engine-executions", daemon=True)
         self.thread.start()
 
     def close(self):
+        from .git_worker import uses_git_worker
+
+        self.git_worker.close()
         self.stop.set()
         if self.thread is not None and self.thread is not threading.current_thread():
             self.thread.join()
+        with self.engine._lock:
+            if not self.engine._unavailable:
+                for key, state in list(self.engine._states.items()):
+                    for action in list(state["actions"].values()):
+                        if action["status"] == "started" and uses_git_worker(action):
+                            completion = self._completion(key, action)
+                            if completion is not None:
+                                self._apply(key, action["action_id"], completion)
         for child in self.children:
             child.poll()
         # Workers are deliberately detached and finish while the server is offline.

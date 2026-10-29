@@ -34,6 +34,8 @@ class CommandScheduler:
         engine = self.engine
         with engine._lock:
             engine._check_available()
+            if engine._stopping:
+                raise EngineError('Engine is stopping.', status=503, code='engine_unavailable')
             key = engine._key(task_set, task)
             previous = engine._duplicate(key, request['request_id'], fingerprint(operation, request))
             if previous is not None:
@@ -94,6 +96,8 @@ class CommandScheduler:
                 return
             action = pending[0]
             if action['status'] == 'started':
+                return
+            if engine._stopping:
                 return
             step = next(step for step in command['steps'] if step['action_id'] == action['action_id'])
             parameters = resolve_parameters(state, command, step)

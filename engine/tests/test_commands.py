@@ -10,7 +10,7 @@ from engine.actions import load_actions
 from engine.commands import load_commands
 from engine.core import acknowledgment
 from engine.errors import CorruptLogError, EngineError
-from engine.tests.support import EngineFixture
+from engine.tests.support import EngineFixture, install_sync_handler
 from engine.tests import test_runner
 
 
@@ -22,9 +22,10 @@ class CommandTests(EngineFixture):
     def setUp(self):
         super().setUp()
         self.addCleanup(self.clean_workers)
+        install_sync_handler(self)
         self.set_actions({
             'prepare': {'handler': 'action_command'},
-            'approve': {'handler': 'action_commit_desing'},
+            'approve': {'handler': 'action_test_sync'},
             'process': {'handler': 'action_command'},
         })
         self.definitions = {
@@ -35,7 +36,7 @@ class CommandTests(EngineFixture):
                 {'action': 'process', 'dependencies': ['approve'], 'parameter_bindings': {'source': {'step': 'approve', 'value': 'result'}}},
             ]},
         }
-        approval = patch('engine.actions.action_commit_desing.action_commit_desing.run', return_value={'approved': True})
+        approval = patch('engine.actions.action_test_sync.action_test_sync.run', return_value={'approved': True})
         self.approve = approval.start()
         self.addCleanup(approval.stop)
 
@@ -295,7 +296,7 @@ class CommandTests(EngineFixture):
             self.engine()
 
     def test_real_worker_timeout_fails_chain_and_cleans_pool(self):
-        self.set_actions({'prepare': {'handler': 'action_command', 'runner': {'argv': [sys.executable, '-c', 'import time; time.sleep(30)'], 'timeout_ms': 100, 'termination_grace_ms': 100}}, 'approve': {'handler': 'action_commit_desing'}, 'process': {'handler': 'action_command'}})
+        self.set_actions({'prepare': {'handler': 'action_command', 'runner': {'argv': [sys.executable, '-c', 'import time; time.sleep(30)'], 'timeout_ms': 100, 'termination_grace_ms': 100}}, 'approve': {'handler': 'action_test_sync'}, 'process': {'handler': 'action_command'}})
         engine = self.engine(workers=True)
         receipt = self.submit(engine)
         self.assertEqual(self.finished(engine, receipt['action_ids'][0])['outcome'], 'timed_out')

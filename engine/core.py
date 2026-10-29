@@ -76,6 +76,7 @@ class Engine:
     ):
         self._lock = threading.RLock()
         self._closed = False
+        self._stopping = False
         self._unavailable = False
         self._store = None
         self._runner = None
@@ -134,12 +135,17 @@ class Engine:
 
     def close(self):
         with self._lock:
-            self._closed = True
-        if self._runner is not None:
-            self._runner.close()
-        with self._lock:
-            if self._store is not None:
-                self._store.close()
+            if self._closed:
+                return
+            self._stopping = True
+        try:
+            if self._runner is not None:
+                self._runner.close()
+        finally:
+            with self._lock:
+                self._closed = True
+                if self._store is not None:
+                    self._store.close()
 
     def __enter__(self):
         return self
@@ -293,7 +299,7 @@ class Engine:
 
     def _start_ready(self, key):
         self._scheduler.advance(key)
-        if key in self._discovered:
+        if not self._stopping and key in self._discovered:
             legacy.start_ready(self, key)
 
     def _initiate(self, key, action_id):
@@ -338,6 +344,8 @@ class Engine:
         return legacy.complete_action(self, key, request)
 
     def command(self, task_set, task, body):
+        if self._stopping:
+            raise EngineError("Engine is stopping.", status=503, code="engine_unavailable")
         return self._scheduler.accept(task_set, task, body)
 
     def cancel(self, task_set, task, body):

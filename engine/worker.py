@@ -109,8 +109,9 @@ def render(value, context):
 
 
 class Executor:
-    def __init__(self, config, job_path, output):
+    def __init__(self, config, job_path, output, *, cancellable=True):
         self.config, self.job_path, self.output = config, job_path, output
+        self.cancellable = cancellable
         self.outcome = None
         self.context = {
             "task": config["action"]["task"],
@@ -136,7 +137,7 @@ class Executor:
         )
 
     def execute(self, command):
-        if (self.job_path / "cancel.json").exists():
+        if self.cancellable and (self.job_path / "cancel.json").exists():
             self.outcome = "cancelled"
             raise RuntimeError("Action cancelled.")
         expand = (
@@ -172,7 +173,7 @@ class Executor:
         grace = 10 if grace is None else grace / 1000
         try:
             while child.poll() is None:
-                if (self.job_path / "cancel.json").exists():
+                if self.cancellable and (self.job_path / "cancel.json").exists():
                     self.outcome = "cancelled"
                     stop_group(child.pid, grace)
                     break

@@ -40,9 +40,15 @@ class SyncActionHandler(ActionHandler):
 
 
 class AsyncActionHandler(ActionHandler):
-    """Persist started, run in a detached worker, then persist completed."""
+    """Persist started, execute outside the engine lock, then persist completed."""
 
     mode = "async"
+
+
+class GitActionHandler(AsyncActionHandler):
+    """Execute a complete Git transaction on the shared git-worker thread."""
+
+    executor = "git-worker"
 
 
 class AgentActionHandler(AsyncActionHandler):
@@ -76,6 +82,8 @@ class AgentActionHandler(AsyncActionHandler):
         context = (
             f"This invocation owns exactly one task: {task_path}. Task set: {task_path.parent}. "
             "Never edit a sibling task. Runtime state and events are owned by the engine; do not edit them.\n"
+            "Git staging, commits, branch changes, and pushes belong to the engine's Git actions. "
+            "Do not mutate Git repositories from this agent invocation.\n"
             f"Original user request:\n{config['action']['parameters'].get('prompt', '')}\n"
         )
         if config["execution"].get("guide"):

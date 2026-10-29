@@ -4,7 +4,7 @@ import subprocess
 from unittest.mock import patch
 
 from engine.actions import load_actions
-from engine.actions.action_export_to_codimango import export_task
+from engine.git_worker.export import export_task
 from engine.tests.support import EngineFixture, export_repository, git
 
 
@@ -132,7 +132,7 @@ class ExportTests(EngineFixture):
     def test_export_lock_contention_does_not_copy(self):
         with (self.checkout / ".git/codimango-export.lock").open("a+b") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with self.assertRaisesRegex(RuntimeError, "Another Cyber Bench operation"):
+            with self.assertRaisesRegex(RuntimeError, "Another Git operation"):
                 self.export()
         self.assertFalse(self.destination.exists())
 
@@ -147,7 +147,7 @@ class ExportTests(EngineFixture):
         self.assertEqual(git(self.remote, "rev-parse", "refs/heads/main"), initial)
 
     def test_source_changes_during_copy_stop_before_commit(self):
-        from engine.actions.action_export_to_codimango import shutil
+        from engine.git_worker.export import shutil
 
         original = shutil.copytree
 
@@ -156,7 +156,7 @@ class ExportTests(EngineFixture):
             self.script.write_text("Concurrent source change")
             return result
 
-        with patch("engine.actions.action_export_to_codimango.shutil.copytree", side_effect=copy):
+        with patch("engine.git_worker.export.shutil.copytree", side_effect=copy):
             with self.assertRaisesRegex(RuntimeError, "changed while copying"):
                 self.export()
         self.assertFalse(self.destination.exists())
