@@ -14,6 +14,25 @@ JsonObject = dict[str, JsonValue]
 TaskKey = tuple[str, str]
 PathLike = str | OsPathLike[str]
 Outcome = Literal["succeeded", "failed", "cancelled", "timed_out"]
+ErrorClassification = Literal["rate_limit", "cyber_safety", "unknown"]
+FailureOrigin = Literal[
+    "agent", "validation", "launch", "worker", "timed_out", "cancelled"
+]
+
+
+class FailureInfo(TypedDict):
+    classification: ErrorClassification
+    origin: FailureOrigin
+    diagnostics: str
+    exit_code: int | None
+
+
+class RetryDecision(TypedDict):
+    model: str
+    attempt_number: int
+    reason: Literal["rate_limit", "cyber_safety"]
+    execute_at: str
+    execution: ExecutionSpec
 
 
 class CommandOptions(TypedDict, total=False):
@@ -36,6 +55,8 @@ class ExecutionSpec(CommandOptions, total=False):
     success_result: JsonObject
     agent: str
     agent_bin: str
+    agent_binaries: dict[str, str]
+    recovery: bool
     templates_path: str
     guide: str
     skill: str
@@ -79,6 +100,10 @@ class ActionStep(ChainStep):
     execution_type: str
     mode: NotRequired[str]
     command_id: NotRequired[str]
+    root_action_id: NotRequired[str]
+    predecessor_action_id: NotRequired[str]
+    attempt_number: NotRequired[int]
+    execute_at: NotRequired[str]
 
 
 class ActionState(TypedDict):
@@ -98,6 +123,12 @@ class ActionState(TypedDict):
     completed_sequence: int | None
     cancel_requested: bool
     command_id: NotRequired[str]
+    root_action_id: NotRequired[str]
+    predecessor_action_id: NotRequired[str]
+    attempt_number: NotRequired[int]
+    execute_at: NotRequired[str]
+    failure: NotRequired[FailureInfo | None]
+    recovery_exhausted: NotRequired[bool]
     dependencies: NotRequired[list[str]]
     dependency_actions: NotRequired[dict[str, str]]
     stale: NotRequired[bool]
@@ -130,6 +161,7 @@ class Completion(TypedDict):
     outcome: Outcome
     result: JsonValue
     error: str | None
+    failure: NotRequired[FailureInfo | None]
 
 
 class RequestBody(TypedDict, total=False):
@@ -144,6 +176,7 @@ class RequestBody(TypedDict, total=False):
     result: JsonValue
     error: str | None
     failed_action_id: str | None
+    failure: FailureInfo | None
 
 
 class EventPayload(TypedDict, total=False):
@@ -162,6 +195,13 @@ class EventPayload(TypedDict, total=False):
     result: JsonValue
     error: str | None
     failed_action_id: str | None
+    failure: FailureInfo | None
+    root_action_id: str
+    predecessor_action_id: str
+    model: str
+    attempt_number: int
+    reason: Literal["rate_limit", "cyber_safety"]
+    execute_at: str
     resources: JsonValue
     invalidated_by: JsonValue
 
@@ -200,6 +240,8 @@ class CommandState(TypedDict):
     parameters: JsonObject
     steps: list[ActionStep]
     action_ids: list[str]
+    schema_version: NotRequired[int]
+    step_action_ids: NotRequired[dict[str, str]]
     status: str
     outcome: Outcome | None
     result: JsonValue

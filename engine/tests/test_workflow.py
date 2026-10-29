@@ -113,7 +113,6 @@ print('measured trials finished')
                 "request_id": "one-shot",
                 "command": "one-shot",
                 "parameters": {
-                    "agent": "claude",
                     "prompt": "Revise the fixture",
                     "action_parameters": {
                         "local_bench": {"attempts": 2, "concurrency": 2}

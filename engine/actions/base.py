@@ -13,6 +13,7 @@ from engine.type_defs import ActionConfig, ExecutionCommand, ExecutionSpec, Json
 from ..errors import EngineError
 from .common import agent_command, validate_parameters
 from .definitions import canonical_json
+from .recovery import AGENTS, AgentInvocationError, terminal_error
 
 
 class ActionHandler(ABC):
@@ -64,11 +65,12 @@ class AgentActionHandler(ActionHandler):
         self: Self, runner: ExecutionSpec, parameters: JsonObject
     ) -> ExecutionSpec:
         spec = super().prepare(runner, parameters)
-        agent = parameters.get("agent", "codex")
-        if not isinstance(agent, str) or agent not in {"codex", "claude", "muse"}:
-            raise EngineError("agent must be codex, claude or muse.")
-        spec["agent"] = agent
-        spec["agent_bin"] = os.environ.get(f"{agent.upper()}_BIN", agent)
+        spec["agent"] = "codex"
+        spec["agent_binaries"] = {
+            agent: os.environ.get(f"{agent.upper()}_BIN", agent) for agent in AGENTS
+        }
+        spec["agent_bin"] = spec["agent_binaries"]["codex"]
+        spec["recovery"] = True
         spec["templates_path"] = os.environ.get(
             "CLAUDE_TEMPLATES_PATH",
             str(Path.home() / ".codex/plugins/cache/claude-templates"),
@@ -118,7 +120,21 @@ class AgentActionHandler(ActionHandler):
             {"cwd": config["task_path"], "timeout_ms": 3600000, "literal": True}
         )
         code = execute(command)
-        if code != 0:
-            raise RuntimeError(
-                f"{config['execution']['agent']} exited with status {code}."
-            )
+        output = Path(config["job_path"]) / "output.log"
+        diagnostics = (
+            output.read_text("utf-8", errors="replace") if output.exists() else ""
+        )
+        terminal = (
+            terminal_error(diagnostics) if config["execution"].get("recovery") else None
+        )
+        if code != 0 or terminal is not None:
+            message = f"{config['execution']['agent']} exited with status {code}."
+            if config["execution"].get("recovery"):
+                raise AgentInvocationError(
+                    message
+                    if code
+                    else f"{config['execution']['agent']} reported a terminal error.",
+                    diagnostics if code else terminal or "",
+                    code,
+                )
+            raise RuntimeError(message)

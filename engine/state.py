@@ -12,7 +12,7 @@ def empty_state(key: TaskKey) -> State:
     state = legacy.empty_state(key)
     state.update(
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "commands": {},
             "active_command_id": None,
             "action_pool": [],
@@ -22,7 +22,7 @@ def empty_state(key: TaskKey) -> State:
 
 
 def reduce_event(state: State, event: Event) -> State:
-    if isinstance(event, dict) and event.get("schema_version") == 2:
+    if isinstance(event, dict) and event.get("schema_version") in (2, 3):
         state = reduce_command_event(state, event)
     else:
         state = legacy.reduce_event(state, event)

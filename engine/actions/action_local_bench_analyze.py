@@ -15,7 +15,7 @@ from .common import digest, read_document
 
 class action_local_bench_analyze(AgentActionHandler):
     name = "local_bench_analyze"
-    parameters = frozenset({"agent", "prompt", "source", "source_id"})
+    parameters = frozenset({"prompt", "source", "source_id"})
     required_parameters = frozenset({"source", "source_id"})
 
     def run(

@@ -15,7 +15,7 @@ from .common import design_sources, digest, read_document
 
 class action_redesign(AgentActionHandler):
     name = "redesign"
-    parameters = frozenset({"agent", "prompt"})
+    parameters = frozenset({"prompt"})
 
     def run(
         self: Self,

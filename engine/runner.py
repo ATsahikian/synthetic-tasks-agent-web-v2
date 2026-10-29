@@ -26,6 +26,7 @@ from engine.type_defs import (
 )
 
 from .actions import reject_constant
+from .actions.recovery import validate_failure
 from .errors import EngineError
 from .storage import atomic_json_write, sync_directory
 from .worker import (
@@ -209,11 +210,14 @@ class ActionRunner:
             in {"succeeded", "failed", "cancelled", "timed_out"}
             and (result.get("error") is None or isinstance(result.get("error"), str))
         ):
-            return {
+            completion: Completion = {
                 "outcome": cast(Outcome, result["outcome"]),
                 "result": result.get("result"),
                 "error": cast(str | None, result.get("error")),
             }
+            if "failure" in result:
+                completion["failure"] = validate_failure(result["failure"])
+            return completion
         from .git_worker import uses_git_worker
 
         if uses_git_worker(action):
@@ -240,6 +244,12 @@ class ActionRunner:
             "outcome": "failed",
             "result": None,
             "error": "Execution worker was interrupted. Submit a new command to retry; the action was not relaunched.",
+            "failure": {
+                "classification": "unknown",
+                "origin": "worker",
+                "diagnostics": "Execution worker was interrupted.",
+                "exit_code": None,
+            },
         }
 
     def recover(self: Self) -> None:
@@ -264,6 +274,7 @@ class ActionRunner:
                 "outcome": result["outcome"],
                 "result": result["result"],
                 "error": result["error"],
+                "failure": result.get("failure"),
             },
         )
         self.engine._start_ready(key)
@@ -281,6 +292,8 @@ class ActionRunner:
                             completion = self._completion(key, action)
                             if completion is not None:
                                 self._apply(key, action["action_id"], completion)
+                        # A delayed head stays in the durable pool until due.
+                        self.engine._start_ready(key)
                 self.children[:] = [
                     child for child in self.children if child.poll() is None
                 ]

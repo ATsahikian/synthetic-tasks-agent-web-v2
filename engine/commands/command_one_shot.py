@@ -69,6 +69,8 @@ class command_one_shot(CommandHandler):
         actions: dict[str, ActionDefinition],
         parameters: JsonObject,
     ) -> list[ActionStep]:
+        if "agent" in parameters:
+            raise EngineError("agent is no longer an accepted command parameter.")
         overrides = parameters.get("action_parameters", {})
         if not isinstance(overrides, dict):
             raise EngineError(
@@ -109,6 +111,8 @@ class command_one_shot(CommandHandler):
             override = overrides.get(name, {})
             if not isinstance(override, dict):
                 raise EngineError("Each action_parameters override must be an object.")
+            if "agent" in override:
+                raise EngineError("agent is no longer an accepted action parameter.")
             values.update(copy.deepcopy(override))
             # Bound arguments are always supplied by the command, not by callers.
             for parameter in step["parameter_bindings"]:

@@ -18,11 +18,14 @@ if __package__ in (None, ""):
 
 
 from engine.actions import canonical_json, run_action
+from engine.actions.recovery import AgentInvocationError
 from engine.storage import atomic_json_write
 from engine.type_defs import (
     ActionConfig,
     Completion,
     ExecutionCommand,
+    FailureInfo,
+    FailureOrigin,
     JsonObject,
     Outcome,
     PathLike,
@@ -135,6 +138,7 @@ class Executor:
         self.config, self.job_path, self.output = config, job_path, output
         self.cancellable = cancellable
         self.outcome: Outcome | None = None
+        self.failure_origin: FailureOrigin = "validation"
         self.context: JsonObject = {
             "task": config["action"]["task"],
             "task_set": config["action"]["task_set"],
@@ -183,6 +187,7 @@ class Executor:
         input_file = self.job_path / "stdin.txt"
         input_file.write_text(input_text or "", "utf-8")
         with input_file.open("rb") as stdin:
+            self.failure_origin = "launch"
             child = subprocess.Popen(
                 argv,
                 cwd=cwd,
@@ -225,6 +230,7 @@ class Executor:
         os.fsync(self.output.fileno())
         if self.outcome:
             raise RuntimeError(f"Action {self.outcome}.")
+        self.failure_origin = "validation"
         return code
 
 
@@ -263,6 +269,21 @@ def main(config_path: PathLike) -> int:
                     "result": None,
                     "error": str(error),
                 }
+                if config["execution"].get("recovery"):
+                    if isinstance(error, AgentInvocationError):
+                        completion["failure"] = error.failure
+                    else:
+                        failure: FailureInfo = {
+                            "classification": "unknown",
+                            "origin": "cancelled"
+                            if executor.outcome == "cancelled"
+                            else "timed_out"
+                            if executor.outcome == "timed_out"
+                            else executor.failure_origin,
+                            "diagnostics": str(error),
+                            "exit_code": None,
+                        }
+                        completion["failure"] = failure
             output.flush()
             os.fsync(output.fileno())
             atomic_json_write(job_path / "result.json", completion)

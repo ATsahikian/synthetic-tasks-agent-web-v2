@@ -48,6 +48,8 @@ def handler_for(name: object) -> ActionHandler:
 def prepare_execution(
     definition: ActionDefinition, parameters: JsonObject
 ) -> ExecutionSpec:
+    if "agent" in parameters:
+        raise EngineError("agent is no longer an accepted action parameter.")
     handler = handler_for(definition["handler"])
     spec = handler.prepare(definition.get("runner", {}), parameters)
     spec["handler"] = definition["handler"]

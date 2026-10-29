@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 
 from engine.type_defs import (
+    ActionState,
     ActionStep,
     CommandState,
     Event,
@@ -16,6 +17,7 @@ from engine.type_defs import (
 )
 
 from ..actions import canonical_json, fingerprint, validate_name, validate_request_id
+from ..actions.recovery import MODELS, is_exhausted, retry_decision, validate_failure
 from ..errors import EngineError
 from .command_one_shot import command_one_shot
 
@@ -27,6 +29,8 @@ TYPES = {
     "started",
     "completed",
     "cancelled",
+    "retry_scheduled",
+    "recovery_exhausted",
 }
 
 
@@ -56,7 +60,10 @@ def validate_event(event: Event, revision: int) -> None:
         "payload",
     }:
         raise EngineError("Invalid command event envelope.")
-    if type(event["schema_version"]) is not int or event["schema_version"] != 2:
+    if type(event["schema_version"]) is not int or event["schema_version"] not in (
+        2,
+        3,
+    ):
         raise EngineError("Unsupported command event schema.")
     if type(event["sequence"]) is not int or event["sequence"] != revision + 1:
         raise EngineError("Event sequences must be contiguous and start at 1.")
@@ -104,6 +111,8 @@ def validate_event(event: Event, revision: int) -> None:
         "started": {"start"},
         "completed": {"report"},
         "cancelled": {"cancel_pending"},
+        "retry_scheduled": {"schedule_retry"},
+        "recovery_exhausted": {"exhaust_recovery"},
     }
     if operation not in expected_operations[event["type"]]:
         raise EngineError("Incorrect operation for command event.")
@@ -152,7 +161,34 @@ def validate_event(event: Event, revision: int) -> None:
         "started": {"parameters"},
         "completed": {"parameters", "outcome", "result", "error"},
         "cancelled": {"error", "failed_action_id"},
+        "retry_scheduled": {
+            "root_action_id",
+            "predecessor_action_id",
+            "model",
+            "attempt_number",
+            "reason",
+            "execute_at",
+            "execution",
+            "parameters",
+        },
+        "recovery_exhausted": {
+            "root_action_id",
+            "predecessor_action_id",
+            "model",
+            "attempt_number",
+            "reason",
+        },
     }[event["type"]]
+    if event["schema_version"] == 3 and event["type"] == "completed":
+        fields.add("failure")
+        validate_failure(payload.get("failure"))
+        if not same_json(request.get("failure"), payload.get("failure")):
+            raise EngineError("Failure differs from its original request.")
+    if event["schema_version"] == 2 and event["type"] in (
+        "retry_scheduled",
+        "recovery_exhausted",
+    ):
+        raise EngineError("Historical commands cannot schedule recovery.")
     if set(payload) != fields | {"operation", "request"}:
         raise EngineError("Invalid command event payload.")
     if "outcome" in payload and (
@@ -177,13 +213,41 @@ def resolve_parameters(
     parameters = copy.deepcopy(step["parameters"])
     by_name = {item["action"]: item for item in command["steps"]}
     for dependency in step["dependencies"]:
-        source = state["actions"][by_name[dependency]["action_id"]]
+        source = state["actions"][
+            resolved_id(command, by_name[dependency]["action_id"])
+        ]
         if source["status"] != "completed" or source["outcome"] != "succeeded":
             raise EngineError("Command dependency has not succeeded.")
     for parameter, binding in step["parameter_bindings"].items():
-        source = state["actions"][by_name[binding["step"]]["action_id"]]
+        source = state["actions"][
+            resolved_id(command, by_name[binding["step"]]["action_id"])
+        ]
         parameters[parameter] = copy.deepcopy(source[binding["value"]])
     return parameters
+
+
+def resolved_id(command: CommandState, root_id: str) -> str:
+    return command.get("step_action_ids", {}).get(root_id, root_id)
+
+
+def effective_actions(state: State, command: CommandState) -> list[ActionState]:
+    return [
+        state["actions"][resolved_id(command, step["action_id"])]
+        for step in command["steps"]
+    ]
+
+
+def original_step(command: CommandState, action: ActionState) -> ActionStep:
+    root_id = action.get("root_action_id", action["action_id"])
+    return next(step for step in command["steps"] if step["action_id"] == root_id)
+
+
+def attempt_parameters(
+    state: State, command: CommandState, action: ActionState
+) -> JsonObject:
+    if "predecessor_action_id" in action:
+        return copy.deepcopy(action["parameters"])
+    return resolve_parameters(state, command, original_step(command, action))
 
 
 def reduce_command_event(state: State, event: Event) -> State:
@@ -273,7 +337,12 @@ def reduce_command_event(state: State, event: Event) -> State:
             "completed_at": None,
             "requested_sequence": event["sequence"],
             "completed_sequence": None,
+            "schema_version": event["schema_version"],
         }
+        if event["schema_version"] == 3:
+            command["step_action_ids"] = {
+                step["action_id"]: step["action_id"] for step in steps
+            }
         state["commands"][command_id] = command
         state["active_command_id"] = command_id
         for step in steps:
@@ -295,6 +364,14 @@ def reduce_command_event(state: State, event: Event) -> State:
                 "completed_sequence": None,
                 "cancel_requested": False,
             }
+            if event["schema_version"] == 3:
+                state["actions"][step["action_id"]].update(
+                    {
+                        "root_action_id": step["action_id"],
+                        "attempt_number": 1,
+                        "failure": None,
+                    }
+                )
     else:
         saved_command = state["commands"].get(command_id)
         if (
@@ -306,6 +383,8 @@ def reduce_command_event(state: State, event: Event) -> State:
                 "Command is not active.", status=409, code="command_not_active"
             )
         command = saved_command
+        if event["schema_version"] != command.get("schema_version", 2):
+            raise EngineError("Command event schema changed during execution.")
         actions = [state["actions"][identity] for identity in command["action_ids"]]
         if kind == "command_cancel_requested":
             if command["cancel_requested"]:
@@ -321,7 +400,10 @@ def reduce_command_event(state: State, event: Event) -> State:
                 raise EngineError("Command still has unfinished actions.")
             if payload["outcome"] == "succeeded" and (
                 command["cancel_requested"]
-                or any(a["outcome"] != "succeeded" for a in actions)
+                or any(
+                    a["outcome"] != "succeeded"
+                    for a in effective_actions(state, command)
+                )
             ):
                 raise EngineError("Command cannot report success.")
             if (
@@ -345,14 +427,84 @@ def reduce_command_event(state: State, event: Event) -> State:
                 }
             )
             state["active_command_id"] = None
+        elif kind in ("retry_scheduled", "recovery_exhausted"):
+            root_id, predecessor_id = (
+                payload["root_action_id"],
+                payload["predecessor_action_id"],
+            )
+            if command["cancel_requested"] or root_id not in command.get(
+                "step_action_ids", {}
+            ):
+                raise EngineError("Command cannot schedule recovery.")
+            predecessor = state["actions"].get(predecessor_id)
+            if (
+                predecessor is None
+                or resolved_id(command, root_id) != predecessor_id
+                or predecessor.get("root_action_id") != root_id
+            ):
+                raise EngineError("Invalid retry predecessor.")
+            decision = retry_decision(predecessor)
+            if kind == "recovery_exhausted":
+                spec, failure = predecessor["execution"], predecessor.get("failure")
+                if (
+                    not is_exhausted(predecessor)
+                    or predecessor.get("recovery_exhausted")
+                    or action_id != predecessor_id
+                ):
+                    raise EngineError("Invalid recovery exhaustion.")
+                assert spec is not None and failure is not None
+                if (
+                    payload["model"] != MODELS[spec["agent"]]
+                    or payload["attempt_number"] != predecessor["attempt_number"]
+                    or payload["reason"] != failure["classification"]
+                ):
+                    raise EngineError("Incorrect exhaustion diagnostics.")
+                predecessor["recovery_exhausted"] = True
+            else:
+                if decision is None or any(
+                    not same_json(payload.get(name), value)
+                    for name, value in decision.items()
+                ):
+                    raise EngineError(
+                        "Retry differs from the captured recovery policy."
+                    )
+                if action_id in state["actions"] or not same_json(
+                    payload["parameters"], predecessor["parameters"]
+                ):
+                    raise EngineError("Invalid replacement action call.")
+                assert action_id is not None
+                replacement = copy.deepcopy(predecessor)
+                replacement.update(
+                    {
+                        "action_id": action_id,
+                        "predecessor_action_id": predecessor_id,
+                        "execution": payload["execution"],
+                        "attempt_number": payload["attempt_number"],
+                        "execute_at": payload["execute_at"],
+                        "status": "queued",
+                        "outcome": None,
+                        "result": None,
+                        "error": None,
+                        "failure": None,
+                        "requested_at": event["timestamp"],
+                        "requested_sequence": event["sequence"],
+                        "started_at": None,
+                        "completed_at": None,
+                        "completed_sequence": None,
+                    }
+                )
+                replacement.pop("recovery_exhausted", None)
+                state["actions"][action_id] = replacement
+                command["action_ids"].insert(
+                    command["action_ids"].index(predecessor_id) + 1, action_id
+                )
+                command["step_action_ids"][root_id] = action_id
         else:
             if action_id not in command["action_ids"]:
                 raise EngineError("Action does not belong to this command.")
             assert action_id is not None
             action = state["actions"][action_id]
-            step = next(
-                step for step in command["steps"] if step["action_id"] == action_id
-            )
+            step = original_step(command, action)
             if kind == "cancelled":
                 if action["status"] != "queued":
                     raise EngineError(
@@ -366,23 +518,30 @@ def reduce_command_event(state: State, event: Event) -> State:
                     }
                 )
             else:
-                unfinished = [a for a in actions if a["status"] != "completed"]
+                effective = effective_actions(state, command)
+                unfinished = [a for a in effective if a["status"] != "completed"]
                 if not unfinished or unfinished[0]["action_id"] != action_id:
                     raise EngineError("Only the command's next action can execute.")
                 if command["cancel_requested"] and action["status"] == "queued":
                     raise EngineError("Cancelled commands cannot start new work.")
                 if any(
                     a["outcome"] != "succeeded"
-                    for a in actions[: actions.index(action)]
+                    for a in effective[: effective.index(action)]
                 ):
                     raise EngineError("Command cannot execute after a failed action.")
                 if not same_json(
-                    payload["parameters"], resolve_parameters(state, command, step)
+                    payload["parameters"], attempt_parameters(state, command, action)
                 ):
                     raise EngineError("Incorrect action parameters for command step.")
                 if kind == "started":
                     if action["status"] != "queued":
                         raise EngineError("Invalid action start.")
+                    if action.get("execute_at") and datetime.fromisoformat(
+                        event["timestamp"]
+                    ) < datetime.fromisoformat(action["execute_at"]):
+                        raise EngineError(
+                            "Delayed retry cannot start before its execution time."
+                        )
                     action.update(
                         {"status": "started", "started_at": event["timestamp"]}
                     )
@@ -401,6 +560,8 @@ def reduce_command_event(state: State, event: Event) -> State:
                         }
                     )
                     action["status"] = "completed"
+                    if event["schema_version"] == 3:
+                        action["failure"] = payload["failure"]
                     if action["outcome"] == "succeeded":
                         state["latest_successful_actions"][action["name"]] = action_id
                 action["parameters"] = payload["parameters"]
@@ -420,22 +581,36 @@ def refresh_state(state: State) -> None:
     """Project queue and freshness without consulting current configuration."""
     active_id = state["active_command_id"]
     active = state["commands"].get(active_id) if active_id is not None else None
-    state["action_pool"] = (
-        []
-        if active is None
-        else [
-            {"command_id": active["command_id"], **copy.deepcopy(step)}
-            for step in active["steps"]
-            if state["actions"][step["action_id"]]["status"] == "queued"
-        ]
-    )
+    state["action_pool"] = []
+    if active is not None:
+        for identity in active["action_ids"]:
+            action = state["actions"][identity]
+            if action["status"] != "queued":
+                continue
+            step = copy.deepcopy(original_step(active, action))
+            step.update({"command_id": active["command_id"], "action_id": identity})
+            if "predecessor_action_id" in action:
+                assert action["execution"] is not None
+                step.update(
+                    {
+                        "root_action_id": action["root_action_id"],
+                        "predecessor_action_id": action["predecessor_action_id"],
+                        "attempt_number": action["attempt_number"],
+                        "execute_at": action["execute_at"],
+                        "parameters": copy.deepcopy(action["parameters"]),
+                        "execution": copy.deepcopy(action["execution"]),
+                    }
+                )
+            state["action_pool"].append(step)
     references = {}
     for command in state["commands"].values():
-        ids = {step["action"]: step["action_id"] for step in command["steps"]}
-        for step in command["steps"]:
-            references[step["action_id"]] = {
-                name: ids[name] for name in step["dependencies"]
-            }
+        ids = {
+            step["action"]: resolved_id(command, step["action_id"])
+            for step in command["steps"]
+        }
+        for identity in command["action_ids"]:
+            step = original_step(command, state["actions"][identity])
+            references[identity] = {name: ids[name] for name in step["dependencies"]}
     memo: dict[str, list[str]] = {}
 
     def stale(action_id: str) -> list[str]:

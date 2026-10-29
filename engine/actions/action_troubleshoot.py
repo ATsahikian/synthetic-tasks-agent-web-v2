@@ -17,7 +17,7 @@ from .definitions import canonical_json
 
 class action_troubleshoot(AgentActionHandler):
     name = "troubleshoot"
-    parameters = frozenset({"agent", "prompt", "evidence_path"})
+    parameters = frozenset({"prompt", "evidence_path"})
     required_parameters = frozenset({"evidence_path"})
     needs_guide = False
 

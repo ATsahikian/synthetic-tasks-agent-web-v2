@@ -63,15 +63,15 @@ data and execute their job without looking up prerequisite actions or task histo
 
 | Action | Parameters |
 | --- | --- |
-| `redesign` | Optional `agent`, `prompt` |
+| `redesign` | Optional `prompt` |
 | `commit_desing` | Required `source`: design result with design/template hashes |
-| `impl` | Required `source`: approved design result; optional `agent`, `prompt`, `reference_task` |
+| `impl` | Required `source`: approved design result; optional `prompt`, `reference_task` |
 | `commit_impl` | Required `source`: implementation result with a passing oracle |
 | `local_bench` | Required `source`: approved implementation result; optional `model`, `benchmark_agent`, `attempts`, `concurrency`, `timeout_multiplier`, `agent_timeout_multiplier` |
-| `local_bench_analyze` | Required `source`: completed benchmark result containing saved trials/trajectories; required `source_id`: benchmark action ID; optional `agent`, `prompt` |
+| `local_bench_analyze` | Required `source`: completed benchmark result containing saved trials/trajectories; required `source_id`: benchmark action ID; optional `prompt` |
 | `export_to_codimango` | Required `source`: implementation result with a passing oracle and design/template hashes |
-| `custom` | Required `prompt`; optional `agent` |
-| `troubleshoot` | Required `evidence_path`; optional `agent`, `prompt` |
+| `custom` | Required `prompt` |
+| `troubleshoot` | Required `evidence_path`; optional `prompt` |
 
 `source` values use the result objects produced by the corresponding jobs.
 Data guards still check hashes, approvals, oracle outcomes, and evidence files.
@@ -131,7 +131,6 @@ bindings take precedence over caller values.
   "request_id": "one-shot-example",
   "command": "one-shot",
   "parameters": {
-    "agent": "codex",
     "prompt": "Revise this task",
     "action_parameters": {
       "local_bench": {"attempts": 2, "concurrency": 2}
@@ -153,7 +152,7 @@ dependencies, or execute prerequisites.
   "command": "one-action",
   "parameters": {
     "action": "custom",
-    "action_parameters": {"prompt": "Inspect this task", "agent": "codex"}
+    "action_parameters": {"prompt": "Inspect this task"}
   }
 }
 ```
@@ -175,13 +174,51 @@ calls in `.review/action-pool.json` as an ordered JSON list. Queued actions have
 separate waiting events. Only the head can execute, and advancement waits for a
 successful result. Synchronous steps retain their completed-only events.
 
-After the last action succeeds, the engine emits `command_completed` with outcome
-`succeeded` and the action results. On failure or timeout, it emits `cancelled`
+After the last logical step succeeds, the engine emits `command_completed` with outcome
+`succeeded` and all attempt results, including recovered failures. On a terminal failure or timeout, it emits `cancelled`
 for each remaining queued action, retaining the original error and failing action
 ID, empties the pool, and completes the command as `failed`. A cancellation stops
 the active worker and cancels the remaining chain. Command completion waits for
 the running worker's result; a late successful result never starts another step
 after cancellation.
+
+### Automatic agent recovery
+
+New calls to `redesign`, `impl`, `local_bench_analyze`, `custom`, and `troubleshoot`
+always start with Codex. The fixed fallback order is Codex → Opus 4.8 with 200k
+context → Muse. Opus uses `claude-opus-4-8` and
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`. Model selection is internal to action code.
+The binary paths from `CODEX_BIN`, `CLAUDE_BIN`, and `MUSE_BIN` are captured at
+acceptance together with the guide, skill text, and command parameters.
+
+| Invocation failure | Scheduling decision |
+| --- | --- |
+| Rate limit | Up to three total attempts per model, with 60 seconds before each same-model retry; after the third failure, switch models immediately and reset the attempt number |
+| Cyber refusal | Switch to the next model immediately and reset the attempt number |
+| Unknown error | Cancel remaining calls and fail the command |
+| Muse has no remaining attempts/models | Record `recovery_exhausted`, cancel remaining calls, and fail the command |
+
+Detection covers cybersecurity flagging and Trusted Access for Cyber messages;
+rate-limit reached/exceeded, Too Many Requests, HTTP 429, and RESOURCE_EXHAUSTED.
+Terminal CLI error results are failures even if the process exits with code zero.
+Successful invocations containing intermediate retry messages remain successful.
+Launch failures, interrupted workers, timeouts, and handler source/output validation
+failures are terminal and retain process and pool cleanup.
+
+Each failed attempt keeps its completion, diagnostics, result, and output directory.
+`retry_scheduled` creates a fresh action ID at the head of the task's pool and records
+`predecessor_action_id`, `root_action_id`, `model`, `attempt_number`, `reason`, and
+`execute_at`, plus the captured execution and parameters. The delayed head blocks
+later calls for this task while other tasks continue. Cancellation cancels delayed
+replacements and prevents further recovery.
+
+Frozen command `steps` retain their original IDs and relationships.
+`step_action_ids` resolves each original ID to its current replacement; dependencies
+and result/action-ID bindings use the successful replacement. `action_ids` and
+command results retain every attempt in execution order. Action state and schema v3
+completion events expose `failure` with `classification`, `origin`, `diagnostics`,
+and `exit_code`. The existing state, events, output APIs, and CLI expose this history.
+Handlers revalidate source data and outputs on every attempt.
 
 ## REST API
 
@@ -309,8 +346,10 @@ lock files remain. Task-set workspace metadata records the resolved project
 location and is refreshed when the project moves.
 
 Events are newline-delimited JSON with contiguous sequences, server-owned IDs,
-and timestamps. New schema v2 events include `command_id`; command lifecycle
-events have `action_id: null`. Historical schema v1 events remain replayable.
+and timestamps. New schema v3 events include `command_id`, structured failures,
+and retry schedules; command lifecycle events have `action_id: null`.
+Historical schema v1 and v2 events remain replayable. Previously accepted commands
+retain their captured execution and do not acquire automatic agent recovery.
 Events are flushed with `fsync` before acknowledgment. An uncertain append makes
 the engine reject further mutations until restart; retry the original request ID.
 An incomplete final line is truncated during recovery. Corruption within committed
@@ -324,7 +363,10 @@ relationships, allowing older dependent results to become stale after a newer
 successful producer execution. `one-action` never uses that history to build a call.
 
 Restart resumes pending commands, completes interrupted failure cleanup, and writes
-missing command completion events. Live detached workers are reconnected; saved
+missing command completion events. Retry scheduling is reconstructed from failed
+completions and schedules in events, including crashes before or after schedule
+persistence. Each predecessor gets one replacement; delayed retries resume when due.
+Live detached workers are reconnected; saved
 results are applied once. A dead detached worker without a result is marked failed
 and its remaining processes are cleaned up. Those actions are not automatically
 relaunched. Historical completed-only events remain replayable.

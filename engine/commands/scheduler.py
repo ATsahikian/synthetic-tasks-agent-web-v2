@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import copy
 import uuid
-from typing import TYPE_CHECKING, Self
+from datetime import datetime
+from typing import TYPE_CHECKING, Self, cast
 
 from engine.type_defs import (
     CommandState,
+    EventPayload,
     JsonObject,
+    JsonValue,
     Outcome,
     Receipt,
     RequestBody,
@@ -16,9 +19,10 @@ from engine.type_defs import (
 )
 
 from ..actions import fingerprint, validate_name
+from ..actions.recovery import MODELS, LiteralReason, is_exhausted, retry_decision
 from ..errors import EngineError
 from .registry import handler_for
-from .state import resolve_parameters
+from .state import attempt_parameters, effective_actions
 
 if TYPE_CHECKING:
     from engine.core import Engine
@@ -138,7 +142,7 @@ class CommandScheduler:
             active_id = state["active_command_id"]
             assert active_id is not None
             command = state["commands"][active_id]
-            actions = [state["actions"][identity] for identity in command["action_ids"]]
+            actions = effective_actions(state, command)
             failure = next(
                 (
                     a
@@ -151,6 +155,56 @@ class CommandScheduler:
                 failure is not None and failure["outcome"] == "cancelled"
             )
             unavailable_task = key not in engine._discovered
+            if (
+                failure
+                and not cancelled
+                and not unavailable_task
+                and command.get("schema_version") == 3
+            ):
+                decision = retry_decision(failure)
+                if decision is not None:
+                    replacement_id = str(uuid.uuid4())
+                    retry_payload: EventPayload = {
+                        "root_action_id": failure["root_action_id"],
+                        "predecessor_action_id": failure["action_id"],
+                        "parameters": copy.deepcopy(failure["parameters"]),
+                        "model": decision["model"],
+                        "attempt_number": decision["attempt_number"],
+                        "reason": decision["reason"],
+                        "execute_at": decision["execute_at"],
+                        "execution": decision["execution"],
+                    }
+                    engine._commit_command(
+                        key,
+                        {"request_id": f"engine:retry:{failure['action_id']}"},
+                        "schedule_retry",
+                        "retry_scheduled",
+                        command["command_id"],
+                        replacement_id,
+                        retry_payload,
+                    )
+                    continue
+                if is_exhausted(failure) and not failure.get("recovery_exhausted"):
+                    spec, diagnostics = failure["execution"], failure.get("failure")
+                    assert spec is not None and diagnostics is not None
+                    engine._commit_command(
+                        key,
+                        {"request_id": f"engine:exhausted:{failure['action_id']}"},
+                        "exhaust_recovery",
+                        "recovery_exhausted",
+                        command["command_id"],
+                        failure["action_id"],
+                        {
+                            "root_action_id": failure["root_action_id"],
+                            "predecessor_action_id": failure["action_id"],
+                            "model": MODELS[spec["agent"]],
+                            "attempt_number": failure["attempt_number"],
+                            "reason": cast(
+                                LiteralReason, diagnostics["classification"]
+                            ),
+                        },
+                    )
+                    continue
             error = (
                 (
                     failure["error"]
@@ -162,6 +216,8 @@ class CommandScheduler:
             failed_action_id = failure["action_id"] if failure else None
             if command["cancel_requested"]:
                 error = "Command cancellation requested."
+            elif failure and failure.get("recovery_exhausted"):
+                error = f"Agent recovery exhausted Muse: {error}"
             elif unavailable_task and failure is None:
                 error = "Task is no longer present in the input catalog."
             if cancelled or failure or unavailable_task:
@@ -188,12 +244,11 @@ class CommandScheduler:
                 return
             if engine._stopping:
                 return
-            step = next(
-                step
-                for step in command["steps"]
-                if step["action_id"] == action["action_id"]
-            )
-            parameters = resolve_parameters(state, command, step)
+            if action.get("execute_at") and engine._now() < datetime.fromisoformat(
+                action["execute_at"]
+            ):
+                return
+            parameters = attempt_parameters(state, command, action)
             engine._commit_command(
                 key,
                 {
@@ -223,11 +278,31 @@ class CommandScheduler:
                 code="action_already_completed",
             )
         command = state["commands"][action["command_id"]]
-        step = next(
-            step
-            for step in command["steps"]
-            if step["action_id"] == action["action_id"]
-        )
+        if (
+            command.get("schema_version") == 3
+            and request["outcome"] != "succeeded"
+            and not request.get("failure")
+        ):
+            request = copy.deepcopy(request)
+            request["failure"] = {
+                "classification": "unknown",
+                "origin": "cancelled"
+                if request["outcome"] == "cancelled"
+                else "timed_out"
+                if request["outcome"] == "timed_out"
+                else "worker",
+                "diagnostics": request["error"]
+                or "Action failed without invocation diagnostics.",
+                "exit_code": None,
+            }
+        payload: EventPayload = {
+            "parameters": attempt_parameters(state, command, action),
+            "outcome": request["outcome"],
+            "result": request["result"],
+            "error": request["error"],
+        }
+        if command.get("schema_version") == 3:
+            payload["failure"] = request.get("failure")
         return engine._commit_command(
             key,
             request,
@@ -235,12 +310,7 @@ class CommandScheduler:
             "completed",
             action["command_id"],
             action["action_id"],
-            {
-                "parameters": resolve_parameters(state, command, step),
-                "outcome": request["outcome"],
-                "result": request["result"],
-                "error": request["error"],
-            },
+            payload,
         )
 
     def _finish(
@@ -264,6 +334,23 @@ class CommandScheduler:
                 for identity in command["action_ids"]
             ]
         }
+        if command.get("schema_version") == 3:
+            for record, identity in zip(
+                cast(list[JsonObject], result["actions"]), command["action_ids"]
+            ):
+                action = actions[identity]
+                spec = action["execution"] or {}
+                record.update(
+                    {
+                        "root_action_id": action["root_action_id"],
+                        "predecessor_action_id": action.get("predecessor_action_id"),
+                        "model": MODELS.get(spec.get("agent", "")),
+                        "attempt_number": action["attempt_number"],
+                        "failure": cast(
+                            JsonValue, copy.deepcopy(action.get("failure"))
+                        ),
+                    }
+                )
         self.engine._commit_command(
             key,
             {

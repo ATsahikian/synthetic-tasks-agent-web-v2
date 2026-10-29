@@ -13,7 +13,7 @@ from .common import design_sources, digest, require_source, result_marker
 
 class action_impl(AgentActionHandler):
     name = "impl"
-    parameters = frozenset({"agent", "prompt", "reference_task", "source"})
+    parameters = frozenset({"prompt", "reference_task", "source"})
     required_parameters = frozenset({"source"})
 
     def prepare(

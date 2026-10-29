@@ -12,7 +12,7 @@ from .base import AgentActionHandler
 
 class action_custom(AgentActionHandler):
     name = "custom"
-    parameters = frozenset({"agent", "prompt"})
+    parameters = frozenset({"prompt"})
     required_parameters = frozenset({"prompt"})
 
     def run(

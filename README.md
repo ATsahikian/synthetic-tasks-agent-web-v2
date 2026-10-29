@@ -7,6 +7,10 @@ chains with durable events, a persistent action pool, a serialized Git worker,
 detached workers, and restart recovery. Actions are function-like jobs with one parameter object. `one-shot` runs
 through trajectory analysis; `one-action` executes a caller-supplied debugging call.
 
+New agent actions start with Codex and recover automatically through Opus 4.8
+with 200k context, then Muse. Each attempt and retry schedule is recorded in events;
+delayed retries survive restarts and block later steps for the same task.
+
 ## Project layout
 
 - `engine/`: Python engine, action definitions, API documentation, and tests.

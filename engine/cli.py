@@ -80,7 +80,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if name in ("run", "command", "cancel", "cancel-command"):
             sub.add_argument("--request-id", default=None)
         if name in ("run", "command"):
-            sub.add_argument("--agent", choices=["codex", "claude", "muse"])
             sub.add_argument("--prompt")
             sub.add_argument("--parameters", type=json_object, default={})
             sub.add_argument("--wait", action="store_true")
@@ -115,8 +114,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             else:
                 parameters = args.parameters.copy()
-                if args.agent:
-                    parameters["agent"] = args.agent
                 if args.prompt:
                     parameters["prompt"] = args.prompt
                 request_id = args.request_id or str(uuid.uuid4())

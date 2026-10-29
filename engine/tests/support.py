@@ -40,6 +40,7 @@ from engine.type_defs import (
     EventPayload,
     ExecutionCommand,
     ExecutionSpec,
+    FailureInfo,
     JsonObject,
     JsonValue,
     Outcome,
@@ -273,12 +274,13 @@ class EngineFixture(unittest.TestCase):
         outcome: Outcome = "succeeded",
         result: JsonValue = None,
         error: str | None = None,
+        failure: FailureInfo | None = None,
     ) -> ActionReceipt:
         key = ("set-one", "task-one")
         directory = job_directory(self.root, key, action_id, create=True)
         atomic_json_write(
             directory / "result.json",
-            {"outcome": outcome, "result": result, "error": error},
+            {"outcome": outcome, "result": result, "error": error, "failure": failure},
         )
         with engine._lock:
             action = engine._states[key]["actions"][action_id]

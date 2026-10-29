@@ -357,14 +357,22 @@ class Engine:
         *,
         command_id: str | None = None,
     ) -> Receipt:
+        saved_command = (
+            self._states[key]["commands"].get(command_id) if command_id else None
+        )
+        schema_version = (
+            saved_command.get("schema_version", 2)
+            if saved_command
+            else (3 if command_id else 1)
+        )
         event: Event = {
-            "schema_version": 2 if command_id else 1,
+            "schema_version": schema_version,
             "sequence": self._states[key]["revision"] + 1,
             "event_id": str(uuid.uuid4()),
             "request_id": request["request_id"],
             "request_fingerprint": fingerprint(operation, request),
             "action_id": action_id,
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timestamp": self._now().isoformat().replace("+00:00", "Z"),
             "type": event_type,
             "payload": payload,
         }
@@ -387,6 +395,10 @@ class Engine:
         self._requests[key][event["request_id"]] = event
         self._save_snapshot(key)
         return acknowledgment(key, event)
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
 
     def _start_ready(self: Self, key: TaskKey) -> None:
         self._scheduler.advance(key)
@@ -412,11 +424,26 @@ class Engine:
                         "outcome": "failed",
                         "result": None,
                         "error": f"Action initiation failed: {error}",
+                        "failure": {
+                            "classification": "unknown",
+                            "origin": "launch",
+                            "diagnostics": str(error),
+                            "exit_code": None,
+                        },
                     },
                 )
 
     def _commit_completion(self: Self, key: TaskKey, request: RequestBody) -> Receipt:
         action = self._states[key]["actions"].get(request["action_id"])
+        command = (
+            self._states[key]["commands"].get(action.get("command_id", ""))
+            if action
+            else None
+        )
+        if command is None or command.get("schema_version", 2) < 3:
+            # Schema v1 reconstructs its request from the original payload fields.
+            request = copy.deepcopy(request)
+            request.pop("failure", None)
         if action is not None and action.get("command_id"):
             return self._scheduler.complete(key, request)
         return legacy.complete_action(self, key, request)
