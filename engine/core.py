@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .actions import (
-    canonical_json, fingerprint, load_actions, run_action, validate_request_id,
+    canonical_json, fingerprint, load_actions, validate_request_id,
 )
 from .discovery import discover_tasks, validate_component
 from .errors import CorruptLogError, EngineError
@@ -321,21 +321,6 @@ class Engine:
                         "error": f"Action initiation failed: {error}",
                     },
                 )
-
-    def _execute_sync(self, key, action):
-        from .runner import action_configuration
-
-        def execute(_):
-            raise RuntimeError("Synchronous handlers cannot launch external commands.")
-
-        try:
-            config = action_configuration(self, key, action)
-            result = run_action(config, execute, Path(config["job_path"]) / "output.log")
-            # Reject malformed results before appending a completion event.
-            canonical_json(result)
-            return {"outcome": "succeeded", "result": result, "error": None}
-        except Exception as error:
-            return {"outcome": "failed", "result": None, "error": str(error)}
 
     def _commit_completion(self, key, request):
         action = self._states[key]["actions"].get(request["action_id"])

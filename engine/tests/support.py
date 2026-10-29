@@ -16,11 +16,11 @@ from engine.errors import EngineError
 from engine.core import Engine, acknowledgment
 from engine.runner import ActionRunner, job_directory
 from engine.storage import atomic_json_write
-from engine.actions.base import SyncActionHandler
+from engine.actions.base import ActionHandler
 
 
-class action_test_sync(SyncActionHandler):
-    """A test-only synchronous handler; production Git actions are asynchronous."""
+class action_test_approval(ActionHandler):
+    """A test-only worker handler with the approval parameter contract."""
 
     name = "approve"
     parameters = frozenset({"source"})
@@ -30,9 +30,9 @@ class action_test_sync(SyncActionHandler):
         return {"approved": True}
 
 
-def install_sync_handler(test):
-    module = ModuleType("engine.actions.action_test_sync")
-    module.action_test_sync = action_test_sync
+def install_approval_handler(test):
+    module = ModuleType("engine.actions.action_test_approval")
+    module.action_test_approval = action_test_approval
     registration = mock.patch.dict(sys.modules, {module.__name__: module})
     registration.start()
     test.addCleanup(registration.stop)
@@ -201,7 +201,6 @@ class HistoricalEngineFixture(EngineFixture):
                 "action": name, "parameters": body["parameters"],
                 "dependencies": self.historical_definitions[name].get("dependencies", []),
                 "execution": historical_execution(definition, body["parameters"]),
-                "mode": definition["mode"],
             }
             if "execution_type" in definition:
                 payload["execution_type"] = definition["execution_type"]
@@ -213,12 +212,7 @@ class HistoricalEngineFixture(EngineFixture):
                 receipt = engine._commit(key, body, "command", "waiting", action_id, payload)
             else:
                 payload["dependency_actions"] = references
-                if definition["mode"] == "sync":
-                    action = {"action_id": action_id, "name": name, **payload}
-                    payload.update(engine._execute_sync(key, action))
-                    receipt = engine._commit(key, body, "command", "completed", action_id, payload)
-                else:
-                    receipt = engine._commit(key, body, "command", "started", action_id, payload)
-                    engine._initiate(key, action_id)
+                receipt = engine._commit(key, body, "command", "started", action_id, payload)
+                engine._initiate(key, action_id)
             engine._start_ready(key)
             return receipt

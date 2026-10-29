@@ -331,5 +331,5 @@ print('measured trials finished')
             ]
             self.assertEqual(
                 execution_events,
-                ["completed"] if action["mode"] == "sync" else ["started", "completed"],
+                ["started", "completed"],
             )

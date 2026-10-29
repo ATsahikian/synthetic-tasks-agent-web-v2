@@ -49,8 +49,8 @@ runtime state into `.review` directories.
 
 ## Actions
 
-`actions/actions.json` defines available jobs. Each definition names a handler,
-its execution mode, and optional internal `runner` settings. Each handler class lives
+`actions/actions.json` defines available jobs. Each definition names a handler
+and optional internal `runner` settings. Each handler class lives
 in its matching file, such as `action_impl` in `actions/action_impl.py`, implements `run(config, execute, output_path)`,
 and declares its accepted and required parameters. Action definitions have no
 dependencies. Requests cannot override internal runner settings.
@@ -76,15 +76,10 @@ data and execute their job without looking up prerequisite actions or task histo
 Data guards still check hashes, approvals, oracle outcomes, and evidence files.
 The design approval action retains its existing spelling, `commit_desing`.
 
-| Mode | Execution |
-| --- | --- |
-| `sync` | Runs inline and emits one `completed` event with its result/error |
-| `async` | Emits `started`, executes outside the engine lock, then emits `completed` |
-
-All built-in actions are asynchronous. `commit_desing`, `commit_impl`, and
+Every action emits `started`, executes outside the engine lock, then emits
+`completed` with its result or error. `commit_desing`, `commit_impl`, and
 `export_to_codimango` use one dedicated `git-worker` thread and a shared durable FIFO
-queue; other actions use detached workers. Handler mode and configured mode must match. Historical actions
-without a mode, or with `mode: durable`, retain their asynchronous lifecycle.
+queue; other actions use detached workers.
 
 The `action_command` handler executes configured argv arrays. Its internal runner
 supports `cwd`, `env`, `input`, `timeout_ms`, `termination_grace_ms`, and
@@ -330,7 +325,7 @@ Restart resumes pending commands, completes interrupted failure cleanup, and wri
 missing command completion events. Live detached workers are reconnected; saved
 results are applied once. A dead detached worker without a result is marked failed
 and its remaining processes are cleaned up. Those actions are not automatically
-relaunched. Historical synchronous completed-only events remain replayable.
+relaunched. Historical completed-only events remain replayable.
 
 ### Git worker
 
@@ -396,7 +391,7 @@ From the repository root:
 python3 -m unittest discover -s engine/tests -v
 ```
 
-Tests cover current command calls, parameter bindings, both action lifecycles,
+Tests cover current command calls, parameter bindings, the worker action lifecycle,
 CLI and REST behavior, queue projection, original-error propagation, cancellation,
 timeout, task ownership, concurrent retries, crash boundaries, and worker recovery.
 Historical fixtures explicitly generate schema v1 events to retain coverage of

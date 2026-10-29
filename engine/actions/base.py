@@ -1,4 +1,4 @@
-"""The two action lifecycles and shared agent execution support."""
+"""Worker action handlers and shared agent execution support."""
 
 import copy
 import json
@@ -12,6 +12,8 @@ from ..errors import EngineError
 
 
 class ActionHandler(ABC):
+    """Persist started, execute outside the engine lock, then persist completed."""
+
     parameters = frozenset()
     accepts_arbitrary_parameters = False
     required_parameters = frozenset()
@@ -33,25 +35,13 @@ class ActionHandler(ABC):
         """Return the result, or raise an exception to report a failed completion."""
 
 
-class SyncActionHandler(ActionHandler):
-    """Run inline and emit a single completed event containing the result or error."""
-
-    mode = "sync"
-
-
-class AsyncActionHandler(ActionHandler):
-    """Persist started, execute outside the engine lock, then persist completed."""
-
-    mode = "async"
-
-
-class GitActionHandler(AsyncActionHandler):
+class GitActionHandler(ActionHandler):
     """Execute a complete Git transaction on the shared git-worker thread."""
 
     executor = "git-worker"
 
 
-class AgentActionHandler(AsyncActionHandler):
+class AgentActionHandler(ActionHandler):
     needs_guide = True
 
     def prepare(self, runner, parameters):

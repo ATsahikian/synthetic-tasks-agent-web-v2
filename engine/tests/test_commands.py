@@ -10,7 +10,8 @@ from engine.actions import load_actions
 from engine.commands import load_commands
 from engine.core import acknowledgment
 from engine.errors import CorruptLogError, EngineError
-from engine.tests.support import EngineFixture, install_sync_handler
+from engine.runner import action_configuration
+from engine.tests.support import EngineFixture, install_approval_handler
 from engine.tests import test_runner
 
 
@@ -22,10 +23,10 @@ class CommandTests(EngineFixture):
     def setUp(self):
         super().setUp()
         self.addCleanup(self.clean_workers)
-        install_sync_handler(self)
+        install_approval_handler(self)
         self.set_actions({
             'prepare': {'handler': 'action_command'},
-            'approve': {'handler': 'action_test_sync'},
+            'approve': {'handler': 'action_test_approval'},
             'process': {'handler': 'action_command'},
         })
         self.definitions = {
@@ -36,9 +37,6 @@ class CommandTests(EngineFixture):
                 {'action': 'process', 'dependencies': ['approve'], 'parameter_bindings': {'source': {'step': 'approve', 'value': 'result'}}},
             ]},
         }
-        approval = patch('engine.actions.action_test_sync.action_test_sync.run', return_value={'approved': True})
-        self.approve = approval.start()
-        self.addCleanup(approval.stop)
 
     def engine(self, **kwargs):
         return self.make_engine(commands=self.definitions, **kwargs)
@@ -49,7 +47,7 @@ class CommandTests(EngineFixture):
     def read_pool(self):
         return json.loads((self.review / 'action-pool.json').read_text())
 
-    def test_chain_binds_parameters_and_preserves_sync_lifecycle(self):
+    def test_chain_binds_parameters_and_dispatches_each_step_to_worker(self):
         engine = self.engine()
         receipt = self.submit(engine, parameters={'action_parameters': {'approve': {'source': {'fake': True}}}})
         ids = receipt['action_ids']
@@ -59,16 +57,22 @@ class CommandTests(EngineFixture):
         self.assertEqual([state['actions'][identity]['status'] for identity in ids], ['started', 'queued', 'queued'])
         self.assertNotIn('dependencies', state['actions'][ids[0]])
         self.finish(engine, ids[0], result={'value': 42})
-        config = self.approve.call_args.args[0]
+        approval = engine.state('set-one', 'task-one')['actions'][ids[1]]
+        config = action_configuration(engine, ('set-one', 'task-one'), approval)
         self.assertEqual(config['action']['parameters'], {'source': {'value': 42}})
         self.assertNotIn('dependency_results', config)
+        self.assertEqual(approval['status'], 'started')
+        self.assertEqual([item['action'] for item in self.read_pool()], ['process'])
+        self.finish(engine, ids[1], result={'approved': True})
         state = engine.state('set-one', 'task-one')
         self.assertEqual(state['actions'][ids[2]]['parameters'], {'source': {'approved': True}})
         self.assertEqual(self.read_pool(), [])
         self.finish(engine, ids[2], result={'done': True})
         events = engine.events('set-one', 'task-one')['events']
-        self.assertEqual([e['type'] for e in events], ['command_started', 'started', 'completed', 'completed', 'started', 'completed', 'command_completed'])
-        self.assertEqual([e['type'] for e in events if e['action_id'] == ids[1]], ['completed'])
+        self.assertEqual([e['type'] for e in events], ['command_started', 'started', 'completed', 'started', 'completed', 'started', 'completed', 'command_completed'])
+        self.assertEqual([e['type'] for e in events if e['action_id'] == ids[1]], ['started', 'completed'])
+        self.assertTrue(all('mode' not in step for step in events[0]['payload']['steps']))
+        self.assertTrue(all('mode' not in action for action in engine.state('set-one', 'task-one')['actions'].values()))
         command = engine.state('set-one', 'task-one')['commands'][receipt['command_id']]
         self.assertEqual(command['outcome'], 'succeeded')
         self.assertEqual(command['result']['actions'][-1]['result'], {'done': True})
@@ -87,16 +91,46 @@ class CommandTests(EngineFixture):
         cancellations = [e for e in engine.events('set-one', 'task-one')['events'] if e['type'] == 'cancelled']
         self.assertEqual(len(cancellations), 2)
         self.assertTrue(all(e['payload']['failed_action_id'] == receipt['action_ids'][0] for e in cancellations))
-        self.approve.assert_not_called()
+        engine._runner.initiate.assert_called_once()
         engine.close()
         restored = self.engine()
         self.assertEqual(restored.state('set-one', 'task-one'), state)
 
-    def test_sync_failure_and_launch_failure_abort_command(self):
+    def test_historical_command_plans_replay_worker_and_direct_completions(self):
         engine = self.engine()
         receipt = self.submit(engine)
-        self.approve.side_effect = RuntimeError('commit failed')
+        for identity, result in zip(receipt['action_ids'], ({'value': 42}, {'approved': True}, {'done': True})):
+            self.finish(engine, identity, result=result)
+        engine.close()
+        log = self.review / 'events.jsonl'
+        original = [json.loads(line) for line in log.read_text().splitlines()]
+        for inline in (False, True):
+            with self.subTest(inline=inline):
+                history = copy.deepcopy(original)
+                for step in history[0]['payload']['steps']:
+                    step['mode'] = 'async'
+                if inline:
+                    history[0]['payload']['steps'][1]['mode'] = 'sync'
+                    history = [event for event in history if not (
+                        event['type'] == 'started' and event['action_id'] == receipt['action_ids'][1]
+                    )]
+                for sequence, event in enumerate(history, 1):
+                    event['sequence'] = sequence
+                log.write_text(''.join(json.dumps(event) + '\n' for event in history))
+                restored = self.engine()
+                state = restored.state('set-one', 'task-one')
+                self.assertEqual(state['commands'][receipt['command_id']]['outcome'], 'succeeded')
+                self.assertEqual(state['actions'][receipt['action_ids'][1]]['result'], {'approved': True})
+                self.assertTrue(all('mode' not in action for action in state['actions'].values()))
+                self.assertEqual(self.submit(restored), receipt)
+                restored._runner.initiate.assert_not_called()
+                restored.close()
+
+    def test_worker_failure_and_launch_failure_abort_command(self):
+        engine = self.engine()
+        receipt = self.submit(engine)
         self.finish(engine, receipt['action_ids'][0], result={})
+        self.finish(engine, receipt['action_ids'][1], outcome='failed', error='commit failed')
         state = engine.state('set-one', 'task-one')
         self.assertEqual(state['commands'][receipt['command_id']]['error'], 'commit failed')
         self.assertEqual(state['actions'][receipt['action_ids'][2]]['outcome'], 'cancelled')
@@ -112,8 +146,11 @@ class CommandTests(EngineFixture):
         self.assertEqual(engine.state('set-one', 'task-one')['revision'], 0)
         source = {'caller': 'supplied'}
         receipt = self.submit(engine, 'one-action', 'debug', {'action': 'approve', 'action_parameters': {'source': source}})
-        self.assertEqual(self.approve.call_args.args[0]['action']['parameters'], {'source': source})
+        action = engine.state('set-one', 'task-one')['actions'][receipt['action_id']]
+        self.assertEqual(action['parameters'], {'source': source})
+        self.assertEqual(action['status'], 'started')
         self.assertEqual(len(receipt['action_ids']), 1)
+        self.finish(engine, receipt['action_id'], result={'approved': True})
         self.assertEqual(engine.state('set-one', 'task-one')['commands'][receipt['command_id']]['outcome'], 'succeeded')
 
     def test_request_rejects_inputs_runner_and_unknown_parameters(self):
@@ -166,7 +203,7 @@ class CommandTests(EngineFixture):
         self.assertTrue(engine.state('set-one', 'task-one')['actions'][receipt['action_ids'][0]]['cancel_requested'])
         self.finish(engine, receipt['action_ids'][0], outcome='cancelled', error='Action cancelled.')
         self.assertEqual(engine.state('set-one', 'task-one')['commands'][receipt['command_id']]['outcome'], 'cancelled')
-        self.approve.assert_not_called()
+        engine._runner.initiate.assert_called_once()
 
     def test_cancel_prevents_next_step_even_when_worker_reports_success(self):
         engine = self.engine()
@@ -174,7 +211,7 @@ class CommandTests(EngineFixture):
         engine.cancel('set-one', 'task-one', {'request_id': 'cancel', 'command_id': receipt['command_id']})
         self.finish(engine, receipt['action_ids'][0], result={'late': 'success'})
         self.assertEqual(engine.state('set-one', 'task-one')['commands'][receipt['command_id']]['outcome'], 'cancelled')
-        self.approve.assert_not_called()
+        engine._runner.initiate.assert_called_once()
 
     def test_pool_and_snapshot_rebuild_from_events(self):
         engine = self.engine()
@@ -211,7 +248,7 @@ class CommandTests(EngineFixture):
         append = engine._store.append
 
         def fail_next(key, event):
-            if event['type'] == 'started' and event['action_id'] == receipt['action_ids'][2]:
+            if event['type'] == 'started' and event['action_id'] == receipt['action_ids'][1]:
                 raise OSError('next start was not written')
             append(key, event)
 
@@ -220,9 +257,11 @@ class CommandTests(EngineFixture):
                 self.finish(engine, receipt['action_ids'][0], result={'value': 1})
         engine.close()
         restored = self.engine()
-        self.assertEqual(self.approve.call_count, 1)
+        restored._runner.initiate.assert_called_once()
         state = restored.state('set-one', 'task-one')
-        self.assertEqual(state['actions'][receipt['action_ids'][2]]['status'], 'started')
+        self.assertEqual(state['actions'][receipt['action_ids'][1]]['status'], 'started')
+        self.assertEqual(restored._runner.initiate.call_args.args[2]['action_id'], receipt['action_ids'][1])
+        self.finish(restored, receipt['action_ids'][1], result={'approved': True})
         self.finish(restored, receipt['action_ids'][2], result={})
         self.assertEqual(restored.state('set-one', 'task-one')['commands'][receipt['command_id']]['outcome'], 'succeeded')
 
@@ -296,7 +335,7 @@ class CommandTests(EngineFixture):
             self.engine()
 
     def test_real_worker_timeout_fails_chain_and_cleans_pool(self):
-        self.set_actions({'prepare': {'handler': 'action_command', 'runner': {'argv': [sys.executable, '-c', 'import time; time.sleep(30)'], 'timeout_ms': 100, 'termination_grace_ms': 100}}, 'approve': {'handler': 'action_test_sync'}, 'process': {'handler': 'action_command'}})
+        self.set_actions({'prepare': {'handler': 'action_command', 'runner': {'argv': [sys.executable, '-c', 'import time; time.sleep(30)'], 'timeout_ms': 100, 'termination_grace_ms': 100}}, 'approve': {'handler': 'action_test_approval'}, 'process': {'handler': 'action_command'}})
         engine = self.engine(workers=True)
         receipt = self.submit(engine)
         self.assertEqual(self.finished(engine, receipt['action_ids'][0])['outcome'], 'timed_out')
@@ -364,6 +403,7 @@ class CommandTests(EngineFixture):
         engine = self.engine()
         receipt = self.submit(engine)
         self.finish(engine, receipt['action_ids'][0], result={'version': 1})
+        self.finish(engine, receipt['action_ids'][1], result={'approved': True})
         self.finish(engine, receipt['action_ids'][2], result={'done': True})
         replacement = self.submit(engine, 'one-action', 'replacement', {'action': 'prepare'})
         self.finish(engine, replacement['action_id'], result={'version': 2})

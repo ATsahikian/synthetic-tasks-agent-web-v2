@@ -5,49 +5,42 @@
       "label": "Redesign",
       "description": "Revise one task design from the current template and author notes.",
       "execution_type": "agent",
-      "mode": "async",
       "handler": "action_redesign"
     },
     "commit_desing": {
       "label": "Commit design",
       "description": "Commit the redesigned task's design.md and record its approval.",
       "execution_type": "script",
-      "mode": "async",
       "handler": "action_commit_desing"
     },
     "impl": {
       "label": "Implementation + oracle",
       "description": "Implement one task and repair its oracle until it passes.",
       "execution_type": "agent",
-      "mode": "async",
       "handler": "action_impl"
     },
     "commit_impl": {
       "label": "Commit implementation",
       "description": "Commit this task's implementation files and approve its passing oracle.",
       "execution_type": "script",
-      "mode": "async",
       "handler": "action_commit_impl"
     },
     "local_bench": {
       "label": "Local benchmark",
       "description": "Run Codimango trials and retain their measured results.",
       "execution_type": "script",
-      "mode": "async",
       "handler": "action_local_bench"
     },
     "local_bench_analyze": {
       "label": "Local benchmark analysis",
       "description": "Analyze all saved trials from the current local benchmark.",
       "execution_type": "agent",
-      "mode": "async",
       "handler": "action_local_bench_analyze"
     },
     "export_to_codimango": {
       "label": "Export to Codimango",
       "description": "Copy the implemented task into Cyber Bench, commit it, and push to main.",
       "execution_type": "script",
-      "mode": "async",
       "handler": "action_export_to_codimango",
       "runner": {
         "repo_path": "/home/atsagikyan/AAI/cyber-bench-atsagikyan"
@@ -57,14 +50,12 @@
       "label": "Custom action",
       "description": "Apply an explicit agent prompt to one selected task.",
       "execution_type": "agent",
-      "mode": "async",
       "handler": "action_custom"
     },
     "troubleshoot": {
       "label": "Troubleshoot",
       "description": "Diagnose a supplied Codimango evidence snapshot without remote mutations.",
       "execution_type": "agent",
-      "mode": "async",
       "handler": "action_troubleshoot"
     }
   }

@@ -2,13 +2,13 @@
 
 import json
 
-from .base import AsyncActionHandler
+from .base import ActionHandler
 from .common import result_marker
 from .definitions import canonical_json
 from ..errors import EngineError
 
 
-class action_command(AsyncActionHandler):
+class action_command(ActionHandler):
     name = "command"
     accepts_arbitrary_parameters = True
 

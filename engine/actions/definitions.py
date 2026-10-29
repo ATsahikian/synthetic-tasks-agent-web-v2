@@ -13,7 +13,6 @@ DEFINITION_FIELDS = {
     "label",
     "description",
     "execution_type",
-    "mode",
     "handler",
     "runner",
 }
@@ -80,11 +79,5 @@ def load_actions(file):
         actions[name] = copy.deepcopy(definition)
         if "runner" in definition:
             actions[name]["runner"] = runner
-        mode = handler.mode
-        if definition.get("mode", mode) not in ("sync", "async"):
-            raise EngineError("mode must be sync or async.")
-        if definition.get("mode", mode) != mode:
-            raise EngineError(f"Action {name} requires mode {mode} for its handler.")
-        actions[name]["mode"] = mode
 
     return actions

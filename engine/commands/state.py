@@ -143,9 +143,10 @@ def reduce_command_event(state, event):
             raise EngineError("Command execution plan must be nonempty.")
         seen_ids = set(state["actions"])
         for step in steps:
-            if not isinstance(step, dict) or set(step) != {
+            # Older stored plans include execution mode metadata.
+            if not isinstance(step, dict) or set(step) - {"mode"} != {
                 "action_id", "action", "parameters", "dependencies", "parameter_bindings",
-                "execution", "mode", "execution_type",
+                "execution", "execution_type",
             }:
                 raise EngineError("Invalid frozen command step.")
             valid_uuid(step["action_id"])
@@ -154,8 +155,6 @@ def reduce_command_event(state, event):
             seen_ids.add(step["action_id"])
             if not isinstance(step["parameters"], dict) or not isinstance(step["execution"], dict):
                 raise EngineError("Invalid action call.")
-            if not isinstance(step["mode"], str) or step["mode"] not in ("sync", "async"):
-                raise EngineError("Invalid action mode.")
             if not isinstance(step["execution_type"], str) or step["execution_type"] not in ("agent", "script"):
                 raise EngineError("Invalid action execution type.")
         command_one_shot().validate_definition({
@@ -182,7 +181,7 @@ def reduce_command_event(state, event):
             state["actions"][step["action_id"]] = {
                 "action_id": step["action_id"], "command_id": command_id, "name": step["action"],
                 "parameters": copy.deepcopy(step["parameters"]), "execution": step["execution"],
-                "mode": step["mode"], "execution_type": step["execution_type"],
+                "execution_type": step["execution_type"],
                 "status": "queued", "outcome": None, "result": None, "error": None,
                 "requested_at": event["timestamp"], "requested_sequence": event["sequence"],
                 "started_at": None, "completed_at": None, "completed_sequence": None,
@@ -232,12 +231,13 @@ def reduce_command_event(state, event):
                 if not same_json(payload["parameters"], resolve_parameters(state, command, step)):
                     raise EngineError("Incorrect action parameters for command step.")
                 if kind == "started":
-                    if action["status"] != "queued" or action["mode"] != "async":
+                    if action["status"] != "queued":
                         raise EngineError("Invalid action start.")
                     action.update({"status": "started", "started_at": event["timestamp"]})
                 else:
-                    expected = "queued" if action["mode"] == "sync" else "started"
-                    if action["status"] != expected:
+                    # Historical plans could complete a queued step directly.
+                    historical_completion = step.get("mode") == "sync" and action["status"] == "queued"
+                    if action["status"] != "started" and not historical_completion:
                         raise EngineError("Invalid action completion.")
                     action.update({key: payload[key] for key in ("outcome", "result", "error")})
                     action["status"] = "completed"

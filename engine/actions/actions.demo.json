@@ -2,7 +2,6 @@
   "schema_version": 1,
   "actions": {
     "prepare": {
-      "mode": "async",
       "handler": "action_command",
       "runner": {
         "argv": [
@@ -13,7 +12,6 @@
       }
     },
     "process": {
-      "mode": "async",
       "handler": "action_command",
       "runner": {
         "argv": [
@@ -24,7 +22,6 @@
       }
     },
     "summarize": {
-      "mode": "async",
       "handler": "action_command",
       "runner": {
         "argv": [

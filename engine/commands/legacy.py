@@ -10,13 +10,8 @@ from ..errors import EngineError
 
 
 OUTCOMES = {"succeeded", "failed", "cancelled", "timed_out"}
+# Accept old mode metadata only when replaying historical payloads.
 ACTION_FIELDS = {"action", "parameters", "dependencies", "execution", "execution_type", "mode"}
-
-
-def action_mode(payload):
-    """Normalize historical detached worker modes when reading accepted commands."""
-    mode = payload.get("mode", "async")
-    return "async" if mode == "durable" else mode
 
 
 def empty_state(key):
@@ -124,8 +119,6 @@ def validate_action_payload(payload):
         raise EngineError("Invalid execution specification.")
     if payload.get("execution_type", "script") not in ("script", "agent"):
         raise EngineError("Invalid execution type.")
-    if action_mode(payload) not in ("sync", "async"):
-        raise EngineError("Invalid action mode.")
 
 
 def validate_event(event, revision):
@@ -183,11 +176,6 @@ def validate_event(event, revision):
             fields = set(payload) & ACTION_FIELDS
             validate_action_payload({name: payload[name] for name in fields})
             expected |= fields
-            mode = action_mode(payload)
-            if (event["type"] == "started" and mode != "async") or (
-                event["type"] == "completed" and mode != "sync"
-            ):
-                raise EngineError("Event does not match the action lifecycle.")
         if set(payload) != expected or not isinstance(payload.get("dependency_actions"), dict):
             raise EngineError("Invalid execution payload.")
     if not isinstance(event["request_fingerprint"], str) or not re.fullmatch(
@@ -232,8 +220,6 @@ def reduce_event(state, event):
             "completed_sequence": None,
             "execution": payload.get("execution"),
             "execution_type": payload.get("execution_type"),
-            # Pre-refactor accepted actions used detached workers for every handler.
-            "mode": action_mode(payload),
             "cancel_requested": False,
         }
         state["current_actions"][payload["action"]] = action_id
@@ -263,8 +249,6 @@ def reduce_event(state, event):
             raise EngineError(
                 "Action is already started.", status=409, code="action_already_started"
             )
-        if event["type"] == "started" and action["mode"] == "sync":
-            raise EngineError("Synchronous actions do not emit started events.")
         references = (
             dependency_references(state, action)
             if action["status"] == "waiting"
@@ -295,24 +279,11 @@ def reduce_event(state, event):
 
 
 def start_ready(engine, key):
-    """Complete sync handlers inline; persist async starts before launching."""
+    """Persist starts before launching ready historical actions on workers."""
     while engine._states[key]["ready_action_ids"]:
         engine._check_available()
         action_id = engine._states[key]["ready_action_ids"][0]
         action = engine._states[key]["actions"][action_id]
-        if action["mode"] == "sync":
-            captured = copy.deepcopy(action)
-            captured["dependency_actions"] = dependency_references(engine._states[key], action)
-            engine._commit_completion(
-                key,
-                {
-                    "request_id": f"engine:completion:{action_id}",
-                    "action_id": action_id,
-                    "type": "completed",
-                    **engine._execute_sync(key, captured),
-                },
-            )
-            continue
         engine._commit(
             key,
             {
@@ -337,7 +308,7 @@ def complete_action(engine, key, request):
         raise EngineError(
             "Action is already completed.", status=409, code="action_already_completed"
         )
-    if action["status"] != "started" and action["mode"] != "sync":
+    if action["status"] != "started":
         raise EngineError(
             "Action has not been initiated by the server.",
             status=409,
@@ -350,11 +321,7 @@ def complete_action(engine, key, request):
         "completed",
         request["action_id"],
         {
-            "dependency_actions": (
-                dependency_references(engine._states[key], action)
-                if action["status"] == "waiting"
-                else copy.deepcopy(action["dependency_actions"])
-            ),
+            "dependency_actions": copy.deepcopy(action["dependency_actions"]),
             **{name: request[name] for name in ("outcome", "result", "error")},
         },
     )

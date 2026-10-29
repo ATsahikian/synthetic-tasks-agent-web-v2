@@ -35,7 +35,6 @@ def action_step(actions, name, parameters, dependencies=(), bindings=None, ids=N
         "dependencies": list(dependencies),
         "parameter_bindings": bindings,
         "execution": execution,
-        "mode": definition["mode"],
         "execution_type": definition.get("execution_type", "script"),
     }
 

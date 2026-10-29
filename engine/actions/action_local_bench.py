@@ -4,11 +4,11 @@ import json
 import os
 from pathlib import Path
 
-from .base import AsyncActionHandler
+from .base import ActionHandler
 from .common import require_source
 
 
-class action_local_bench(AsyncActionHandler):
+class action_local_bench(ActionHandler):
     name = "local_bench"
     parameters = frozenset({
         "source", "model", "benchmark_agent", "attempts", "concurrency",

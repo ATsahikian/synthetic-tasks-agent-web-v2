@@ -146,7 +146,7 @@ def main(argv=None):
         print(str(error), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        # Leaving the client does not silently cancel an async job.
+        # Leaving the client does not silently cancel a running job.
         return 130
 
 

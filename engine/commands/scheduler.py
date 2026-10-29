@@ -101,17 +101,11 @@ class CommandScheduler:
                 return
             step = next(step for step in command['steps'] if step['action_id'] == action['action_id'])
             parameters = resolve_parameters(state, command, step)
-            if action['mode'] == 'sync':
-                captured = copy.deepcopy(action)
-                captured['parameters'] = parameters
-                result = engine._execute_sync(key, captured)
-                self.complete(key, {'request_id': f"engine:completion:{action['action_id']}", 'action_id': action['action_id'], 'type': 'completed', **result})
-            else:
-                engine._commit_command(
-                    key, {'request_id': f"engine:start:{action['action_id']}", 'action_id': action['action_id'], 'type': 'started'},
-                    'start', 'started', command['command_id'], action['action_id'], {'parameters': parameters},
-                )
-                engine._initiate(key, action['action_id'])
+            engine._commit_command(
+                key, {'request_id': f"engine:start:{action['action_id']}", 'action_id': action['action_id'], 'type': 'started'},
+                'start', 'started', command['command_id'], action['action_id'], {'parameters': parameters},
+            )
+            engine._initiate(key, action['action_id'])
 
     def complete(self, key, request):
         engine = self.engine
