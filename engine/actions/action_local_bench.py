@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Self
 
@@ -17,6 +18,7 @@ from engine.type_defs import (
 
 from .base import ActionHandler
 from .common import require_source
+from .metacode_cache import metacode_local_cache
 
 
 class action_local_bench(ActionHandler):
@@ -52,6 +54,7 @@ class action_local_bench(ActionHandler):
         parameters = action["parameters"]
         task_path = Path(config["task_path"])
         approval = require_source(config, approved=True, oracle=True)
+        benchmark_agent = text_value(parameters.get("benchmark_agent", "metacode"))
         attempts = parameters.get("attempts", 5)
         assert isinstance(attempts, int)
         run_path = Path(config["job_path"]) / "benchmark"
@@ -62,7 +65,7 @@ class action_local_bench(ActionHandler):
             "-p",
             action["task"],
             "-a",
-            text_value(parameters.get("benchmark_agent", "metacode")),
+            benchmark_agent,
             "-m",
             text_value(parameters.get("model", "meta/avocado-code-flex")),
             "-k",
@@ -77,14 +80,26 @@ class action_local_bench(ActionHandler):
             "-o",
             str(run_path),
         ]
-        code = execute(
-            {
-                "argv": argv,
-                "cwd": str(task_path.parent),
-                "timeout_ms": None,
-                "literal": True,
-            }
+        cache_context = (
+            metacode_local_cache() if benchmark_agent == "metacode" else nullcontext()
         )
+        with cache_context as cache:
+            if cache is not None:
+                with output_path.open("a", encoding="utf-8") as output:
+                    output.write(f"[benchmark] Using flat MetaCode local cache: {cache}\n")
+            code = execute(
+                {
+                    "argv": argv,
+                    "cwd": str(task_path.parent),
+                    "env": (
+                        {"HARBOR_METACODE_LOCAL_CACHE": str(cache)}
+                        if cache is not None
+                        else {}
+                    ),
+                    "timeout_ms": None,
+                    "literal": True,
+                }
+            )
         result = benchmark_summary(run_path, attempts)
         result.update(
             {

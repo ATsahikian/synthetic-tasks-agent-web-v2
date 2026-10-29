@@ -89,6 +89,12 @@ print('measured trials finished')
 """
         )
         codimango.chmod(0o700)
+        cache_source = self.base / "metacode-cache"
+        cache_source.mkdir()
+        for name in ("metacode", "metacode-bin"):
+            binary = cache_source / name
+            binary.write_text(f"fixture {name}\n")
+            binary.chmod(0o755)
         environment = patch.dict(
             "os.environ",
             {
@@ -97,6 +103,8 @@ print('measured trials finished')
                 "CLAUDE_BIN": str(agent),
                 "CODIMANGO_BIN": str(codimango),
                 "CODIMANGO_REPO_ROOT": str(self.export_root),
+                "SYNTHETIC_METACODE_CACHE_SOURCE": str(cache_source),
+                "HARBOR_METACODE_LOCAL_CACHE": "",
             },
         )
         environment.start()

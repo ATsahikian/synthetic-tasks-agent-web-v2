@@ -27,6 +27,18 @@ Configuration changes take effect on restart and affect newly accepted commands.
 Accepted commands retain their original parameters, relationships, and prepared
 execution settings.
 
+MetaCode local benchmarks stage the existing `metacode` and `metacode-bin`
+binaries into a private flat cache for each benchmark process and pass
+`HARBOR_METACODE_LOCAL_CACHE` to Codimango. This preserves the v1 protection
+against concurrent shared Manifold `LATEST` downloads (T288195307). Tasks and
+trials can run concurrently; each process removes its staged cache on completion
+or failure. Sources default to `~/.cache/harbor/metacode/<platform>-<architecture>/`,
+preferring `LATEST`. Set `SYNTHETIC_METACODE_CACHE_SOURCE` to choose a flat source,
+or `SYNTHETIC_METACODE_SHARED_CACHE` to choose another shared cache root. An
+explicit `HARBOR_METACODE_LOCAL_CACHE` must contain both executable, nonempty
+files and is preserved. Missing or invalid caches fail before launching
+Codimango. Other benchmark agents do not require the MetaCode cache.
+
 ## Task layout
 
 ```text
