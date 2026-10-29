@@ -1,13 +1,17 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Sequence
+
+from engine.type_defs import Catalog, PathLike, Task, TaskKey, TaskSet
 
 from .errors import EngineError
-
 
 SET_MARKERS = ("template.md", "instruction.md")
 TASK_MARKERS = ("design.md", "task.toml", "instruction.md")
 
 
-def validate_component(value):
+def validate_component(value: object) -> str:
     if (
         not isinstance(value, str)
         or not value
@@ -20,17 +24,19 @@ def validate_component(value):
     return value
 
 
-def markers(directory, candidates):
+def markers(directory: Path, candidates: Sequence[str]) -> list[str]:
     return [
-        name for name in candidates
+        name
+        for name in candidates
         if (directory / name).is_file() and not (directory / name).is_symlink()
     ]
 
 
-def child_directories(directory):
+def child_directories(directory: Path) -> list[Path]:
     return sorted(
         (
-            child for child in directory.iterdir()
+            child
+            for child in directory.iterdir()
             if not child.name.startswith(".")
             and not child.is_symlink()
             and child.is_dir()
@@ -39,33 +45,37 @@ def child_directories(directory):
     )
 
 
-def discover_tasks(root):
+def discover_tasks(root: PathLike) -> tuple[Catalog, set[TaskKey]]:
     root = Path(root).resolve()
     if not root.is_dir():
         raise EngineError(f"Task root must be an existing directory: {root}")
-    task_sets = []
+    task_sets: list[TaskSet] = []
     keys = set()
     for set_directory in child_directories(root):
         set_markers = markers(set_directory, SET_MARKERS)
         if not set_markers:
             continue
         validate_component(set_directory.name)
-        tasks = []
+        tasks: list[Task] = []
         for task_directory in child_directories(set_directory):
             task_markers = markers(task_directory, TASK_MARKERS)
             if not task_markers:
                 continue
             validate_component(task_directory.name)
             keys.add((set_directory.name, task_directory.name))
-            tasks.append({
-                "name": task_directory.name,
-                "path": str(task_directory),
-                "markers": task_markers,
-            })
-        task_sets.append({
-            "name": set_directory.name,
-            "path": str(set_directory),
-            "markers": set_markers,
-            "tasks": tasks,
-        })
+            tasks.append(
+                {
+                    "name": task_directory.name,
+                    "path": str(task_directory),
+                    "markers": task_markers,
+                }
+            )
+        task_sets.append(
+            {
+                "name": set_directory.name,
+                "path": str(set_directory),
+                "markers": set_markers,
+                "tasks": tasks,
+            }
+        )
     return {"tasks_root": str(root), "task_sets": task_sets}, keys

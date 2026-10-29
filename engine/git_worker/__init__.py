@@ -2,5 +2,4 @@
 
 from .worker import GitWorker, uses_git_worker
 
-
 __all__ = ["GitWorker", "uses_git_worker"]

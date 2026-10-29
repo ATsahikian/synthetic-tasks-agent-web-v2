@@ -1,19 +1,23 @@
+from __future__ import annotations
+
 import fcntl
 import json
 import logging
 import os
 import uuid
 from pathlib import Path
+from typing import Self, cast
+
+from engine.type_defs import Event, PathLike, State, TaskKey
 
 from .actions import reject_constant
 from .discovery import child_directories, validate_component
 from .errors import CorruptLogError, EngineError
 
-
 LOGGER = logging.getLogger(__name__)
 
 
-def sync_directory(directory):
+def sync_directory(directory: Path) -> None:
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(descriptor)
@@ -21,7 +25,7 @@ def sync_directory(directory):
         os.close(descriptor)
 
 
-def atomic_json_write(file, value):
+def atomic_json_write(file: Path, value: object) -> None:
     temporary = file.with_name(f".{file.name}.tmp-{uuid.uuid4()}")
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -39,26 +43,30 @@ def atomic_json_write(file, value):
 class EventStore:
     """Task histories and locks live in task .review folders."""
 
-    def __init__(self, tasks_root):
+    def __init__(self: Self, tasks_root: PathLike) -> None:
         self.directory = Path(tasks_root).resolve()
-        self._lock_descriptors = {}
+        self._lock_descriptors: dict[TaskKey, int] = {}
         if not self.directory.is_dir():
-            raise EngineError(f"Task root must be an existing directory: {self.directory}")
+            raise EngineError(
+                f"Task root must be an existing directory: {self.directory}"
+            )
 
-    def close(self):
+    def close(self: Self) -> None:
         for descriptor in self._lock_descriptors.values():
             os.close(descriptor)
         self._lock_descriptors.clear()
 
-    def _set_directory(self, task_set):
+    def _set_directory(self: Self, task_set: str) -> Path:
         validate_component(task_set)
         directory = self.directory / task_set
         if directory.is_symlink() or not directory.is_dir():
-            raise EngineError(f"Task-set directory must exist and not be a symlink: {directory}")
+            raise EngineError(
+                f"Task-set directory must exist and not be a symlink: {directory}"
+            )
         return directory
 
     @staticmethod
-    def _review_directory(directory, *, create=False):
+    def _review_directory(directory: Path, *, create: bool = False) -> Path:
         review = directory / ".review"
         if review.is_symlink():
             raise EngineError(f"Review directories must not be symlinks: {review}")
@@ -70,7 +78,7 @@ class EventStore:
             raise EngineError(f"Review path must be a directory: {review}")
         return review
 
-    def ensure_workspace(self, task_set):
+    def ensure_workspace(self: Self, task_set: str) -> None:
         review = self._review_directory(self._set_directory(task_set), create=True)
         file = review / "workspace.json"
         if file.is_symlink():
@@ -84,21 +92,25 @@ class EventStore:
         saved = None
         if file.exists():
             try:
-                saved = json.loads(file.read_text("utf-8"), parse_constant=reject_constant)
+                saved = json.loads(
+                    file.read_text("utf-8"), parse_constant=reject_constant
+                )
             except ValueError:
                 pass
         if saved != manifest:
             atomic_json_write(file, manifest)
 
-    def _task_directory(self, key, *, create=False):
+    def _task_directory(self: Self, key: TaskKey, *, create: bool = False) -> Path:
         task_set, task = key
         validate_component(task)
         directory = self._set_directory(task_set) / task
         if directory.is_symlink() or not directory.is_dir():
-            raise EngineError(f"Task directory must exist and not be a symlink: {directory}")
+            raise EngineError(
+                f"Task directory must exist and not be a symlink: {directory}"
+            )
         return self._review_directory(directory, create=create)
 
-    def task_keys(self):
+    def task_keys(self: Self) -> set[TaskKey]:
         result = set()
         for set_directory in child_directories(self.directory):
             for task_directory in child_directories(set_directory):
@@ -108,11 +120,13 @@ class EventStore:
                     result.add(key)
         return result
 
-    def ensure_task(self, key):
+    def ensure_task(self: Self, key: TaskKey) -> None:
         directory = self._task_directory(key, create=True)
         if key not in self._lock_descriptors:
             descriptor = os.open(
-                directory / "engine.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600,
+                directory / "engine.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
             )
             self._lock_descriptors[key] = descriptor
             try:
@@ -120,7 +134,8 @@ class EventStore:
             except BlockingIOError as error:
                 raise EngineError(
                     f"Another engine owns task {key[0]}/{key[1]}.",
-                    status=409, code="engine_already_running",
+                    status=409,
+                    code="engine_already_running",
                 ) from error
         file = directory / "events.jsonl"
         descriptor = os.open(
@@ -129,7 +144,7 @@ class EventStore:
         os.close(descriptor)
         sync_directory(file.parent)
 
-    def read_events(self, key):
+    def read_events(self: Self, key: TaskKey) -> list[Event]:
         file = self._task_directory(key) / "events.jsonl"
         if file.is_symlink():
             raise CorruptLogError(f"Event log must not be a symlink: {file}")
@@ -149,14 +164,19 @@ class EventStore:
             try:
                 event = json.loads(line.decode("utf-8"), parse_constant=reject_constant)
             except (UnicodeError, ValueError) as error:
-                raise CorruptLogError(f"Invalid event at {file}:{index}: {error}") from error
-            events.append(event)
+                raise CorruptLogError(
+                    f"Invalid event at {file}:{index}: {error}"
+                ) from error
+            events.append(cast(Event, event))
         return events
 
-    def append(self, key, event):
+    def append(self: Self, key: TaskKey, event: Event) -> None:
         file = self._task_directory(key) / "events.jsonl"
         encoded = (
-            json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n"
+            json.dumps(
+                event, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            )
+            + "\n"
         ).encode("utf-8")
         descriptor = os.open(file, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
         try:
@@ -170,10 +190,10 @@ class EventStore:
         finally:
             os.close(descriptor)
 
-    def write_snapshot(self, key, state):
+    def write_snapshot(self: Self, key: TaskKey, state: State) -> None:
         atomic_json_write(self._task_directory(key) / "job.json", state)
 
-    def write_pool(self, key, state):
+    def write_pool(self: Self, key: TaskKey, state: State) -> None:
         file = self._task_directory(key) / "action-pool.json"
         if file.is_symlink():
             raise EngineError("Action pool must not be a symlink.")

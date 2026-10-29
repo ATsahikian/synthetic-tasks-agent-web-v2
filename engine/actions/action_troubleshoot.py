@@ -1,12 +1,18 @@
 """Troubleshoot action handler."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
+from typing import Callable, Self
 
+from engine.json_data import array_value, object_value, text_value
+from engine.type_defs import ActionConfig, ExecutionCommand, JsonObject, JsonValue
+
+from ..storage import atomic_json_write
 from .base import AgentActionHandler
 from .common import digest, read_document
 from .definitions import canonical_json
-from ..storage import atomic_json_write
 
 
 class action_troubleshoot(AgentActionHandler):
@@ -15,11 +21,16 @@ class action_troubleshoot(AgentActionHandler):
     required_parameters = frozenset({"evidence_path"})
     needs_guide = False
 
-    def run(self, config, execute, output_path):
+    def run(
+        self: Self,
+        config: ActionConfig,
+        execute: Callable[[ExecutionCommand], int],
+        output_path: Path,
+    ) -> JsonObject:
         parameters = config["action"]["parameters"]
         task_path, job_path = Path(config["task_path"]), Path(config["job_path"])
         context = self.context(config)
-        evidence = Path(parameters["evidence_path"]).resolve()
+        evidence = Path(text_value(parameters["evidence_path"])).resolve()
         if not evidence.is_relative_to(task_path.resolve()) or evidence.is_symlink():
             raise RuntimeError("evidence_path must be a regular file inside this task.")
         snapshot = json.loads(read_document(evidence))
@@ -42,7 +53,7 @@ class action_troubleshoot(AgentActionHandler):
         return {"report_path": str(report)}
 
 
-def validate_findings(report, evidence):
+def validate_findings(report: JsonValue, evidence: JsonValue) -> None:
     if (
         not isinstance(report, dict)
         or report.get("schema_version") != 1
@@ -50,22 +61,33 @@ def validate_findings(report, evidence):
         or not report["findings"]
     ):
         raise RuntimeError("Troubleshoot report needs schema_version 1 and findings.")
-    for finding in report["findings"]:
+    for raw_finding in array_value(report["findings"]):
+        finding = object_value(raw_finding)
         if (
             finding.get("classification")
-            not in {"task_related", "not_task_related", "undetermined", "not_applicable"}
+            not in {
+                "task_related",
+                "not_task_related",
+                "undetermined",
+                "not_applicable",
+            }
             or not finding.get("cause")
             or not finding.get("evidence")
         ):
             raise RuntimeError("Invalid troubleshoot finding.")
-        for citation in finding["evidence"]:
+        for raw_citation in array_value(finding["evidence"]):
+            citation = object_value(raw_citation)
             value = evidence
-            pointer = citation.get("pointer", "")
+            pointer = text_value(citation.get("pointer", ""))
             if pointer and not pointer.startswith("/"):
                 raise RuntimeError("Invalid evidence pointer.")
             for segment in pointer.split("/")[1:]:
                 segment = segment.replace("~1", "/").replace("~0", "~")
-                value = value[int(segment)] if isinstance(value, list) else value[segment]
+                value = (
+                    value[int(segment)]
+                    if isinstance(value, list)
+                    else object_value(value)[segment]
+                )
             quoted = citation.get("quote")
             text = value if isinstance(value, str) else canonical_json(value)
             if not isinstance(quoted, str) or not quoted.strip() or quoted not in text:

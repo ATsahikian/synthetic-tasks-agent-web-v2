@@ -1,10 +1,16 @@
 """LocalBenchAnalyze action handler."""
 
-from pathlib import Path
+from __future__ import annotations
 
+from pathlib import Path
+from typing import Callable, Self
+
+from engine.json_data import array_value, object_value, text_value
+from engine.type_defs import ActionConfig, ExecutionCommand, JsonObject
+
+from ..storage import atomic_json_write
 from .base import AgentActionHandler
 from .common import digest, read_document
-from ..storage import atomic_json_write
 
 
 class action_local_bench_analyze(AgentActionHandler):
@@ -12,18 +18,32 @@ class action_local_bench_analyze(AgentActionHandler):
     parameters = frozenset({"agent", "prompt", "source", "source_id"})
     required_parameters = frozenset({"source", "source_id"})
 
-    def run(self, config, execute, output_path):
+    def run(
+        self: Self,
+        config: ActionConfig,
+        execute: Callable[[ExecutionCommand], int],
+        output_path: Path,
+    ) -> JsonObject:
         action = config["action"]
         task_path, job_path = Path(config["task_path"]), Path(config["job_path"])
-        design_path, template_path = task_path / "design.md", task_path.parent / "template.md"
+        design_path, template_path = (
+            task_path / "design.md",
+            task_path.parent / "template.md",
+        )
         context = self.context(config)
-        benchmark = action["parameters"]["source"]
+        benchmark = object_value(action["parameters"]["source"])
         if benchmark.get("design_sha256") != digest(design_path) or benchmark.get(
             "template_sha256"
         ) != digest(template_path):
-            raise RuntimeError("Benchmark inputs are stale; rerun implementation and benchmark.")
-        artifacts = [Path(row["result_path"]) for row in benchmark.get("trials", [])] + [
-            Path(file) for file in benchmark.get("trajectories", [])
+            raise RuntimeError(
+                "Benchmark inputs are stale; rerun implementation and benchmark."
+            )
+        artifacts = [
+            Path(text_value(object_value(row)["result_path"]))
+            for row in array_value(benchmark.get("trials", []))
+        ] + [
+            Path(text_value(file))
+            for file in array_value(benchmark.get("trajectories", []))
         ]
         if not benchmark.get("run_completed") or not artifacts:
             raise RuntimeError(
@@ -47,7 +67,9 @@ class action_local_bench_analyze(AgentActionHandler):
         )
         self.execute_agent(config, execute, prompt)
         read_document(report)
-        if any(digest(Path(file)) != hashed for file, hashed in artifact_hashes.items()):
+        if any(
+            digest(Path(file)) != hashed for file, hashed in artifact_hashes.items()
+        ):
             raise RuntimeError("Benchmark evidence changed during analysis.")
         text = report.read_text("utf-8")
         required = [
@@ -68,4 +90,7 @@ class action_local_bench_analyze(AgentActionHandler):
             raise RuntimeError(
                 "Analysis report is missing required sections or trial references."
             )
-        return {"report_path": str(report), **{key: benchmark[key] for key in ("design_sha256", "template_sha256")}}
+        return {
+            "report_path": str(report),
+            **{key: benchmark[key] for key in ("design_sha256", "template_sha256")},
+        }

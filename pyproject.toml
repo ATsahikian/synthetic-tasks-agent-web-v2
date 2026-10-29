@@ -1,0 +1,4 @@
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["engine", "tools"]

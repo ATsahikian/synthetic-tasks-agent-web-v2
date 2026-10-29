@@ -1,9 +1,11 @@
 """Resolve the handler named by a command definition."""
 
+from __future__ import annotations
+
+from ..errors import EngineError
+from .base import CommandHandler
 from .command_one_action import command_one_action
 from .command_one_shot import command_one_shot
-from ..errors import EngineError
-
 
 HANDLERS = {
     "command_one_action": command_one_action,
@@ -11,7 +13,7 @@ HANDLERS = {
 }
 
 
-def handler_for(name):
+def handler_for(name: object) -> CommandHandler:
     if not isinstance(name, str) or name not in HANDLERS:
         raise EngineError("Unknown command handler.")
     return HANDLERS[name]()

@@ -1,23 +1,36 @@
 """Handler for configured executable commands."""
 
-import json
+from __future__ import annotations
 
+import copy
+from pathlib import Path
+from typing import Callable, Self, cast
+
+from engine.type_defs import ActionConfig, ExecutionCommand, ExecutionSpec, JsonObject
+
+from ..errors import EngineError
 from .base import ActionHandler
 from .common import result_marker
 from .definitions import canonical_json
-from ..errors import EngineError
 
 
 class action_command(ActionHandler):
     name = "command"
     accepts_arbitrary_parameters = True
 
-    runner_fields = frozenset({
-        "argv", "input", "env", "cwd", "timeout_ms",
-        "termination_grace_ms", "success_result",
-    })
+    runner_fields = frozenset(
+        {
+            "argv",
+            "input",
+            "env",
+            "cwd",
+            "timeout_ms",
+            "termination_grace_ms",
+            "success_result",
+        }
+    )
 
-    def configure_runner(self, runner, directory):
+    def configure_runner(self: Self, runner: object, directory: Path) -> ExecutionSpec:
         runner = super().configure_runner(runner, directory)
         if (
             not isinstance(runner.get("argv"), list)
@@ -44,15 +57,26 @@ class action_command(ActionHandler):
             value = runner.get(field)
             if value is not None and (type(value) is not int or value <= 0):
                 raise EngineError(f"runner.{field} must be a positive integer or null.")
-        if "success_result" in runner and not isinstance(runner["success_result"], dict):
+        if "success_result" in runner and not isinstance(
+            runner["success_result"], dict
+        ):
             raise EngineError("runner.success_result must be an object.")
         return runner
 
-    def prepare(self, runner, parameters):
-        return json.loads(canonical_json(runner))
+    def prepare(
+        self: Self, runner: ExecutionSpec, parameters: JsonObject
+    ) -> ExecutionSpec:
+        canonical_json(runner)
+        return copy.deepcopy(runner)
 
-    def run(self, config, execute, output_path):
-        code = execute(config["execution"])
+    def run(
+        self: Self,
+        config: ActionConfig,
+        execute: Callable[[ExecutionCommand], int],
+        output_path: Path,
+    ) -> JsonObject:
+        # configure_runner validated argv before this execution was captured.
+        code = execute(cast(ExecutionCommand, config["execution"]))
         if code != 0:
             raise RuntimeError(f"Command exited with status {code}.")
         result = result_marker(output_path)

@@ -1,53 +1,73 @@
 """Command-line client for an already running engine; never launches a server."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
 import time
 import uuid
+from typing import Sequence, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from engine.json_data import loads, object_value, text_value
+from engine.type_defs import JsonObject, State
+
 from .actions import reject_constant
 
 
-def request(base, path, body=None):
+def request(base: str, path: str, body: object = None) -> JsonObject:
     data = None if body is None else json.dumps(body, allow_nan=False).encode("utf-8")
     try:
         with urlopen(
             Request(
                 base.rstrip("/") + path,
                 data=data,
-                headers={"Content-Type": "application/json"} if data is not None else {},
+                headers={"Content-Type": "application/json"}
+                if data is not None
+                else {},
             ),
             timeout=15,
         ) as response:
-            return json.loads(response.read())
+            return object_value(loads(response.read()))
     except HTTPError as error:
         detail = json.loads(error.read()).get("error", {})
-        raise RuntimeError(f"HTTP {error.code}: {detail.get('message', error.reason)}") from error
+        raise RuntimeError(
+            f"HTTP {error.code}: {detail.get('message', error.reason)}"
+        ) from error
     except URLError as error:
         raise RuntimeError(f"Cannot reach the engine: {error.reason}") from error
 
 
-def json_object(value):
+def json_object(value: str) -> JsonObject:
     try:
         value = json.loads(value, parse_constant=reject_constant)
         if not isinstance(value, dict):
             raise ValueError("Expected an object")
         return value
     except ValueError as error:
-        raise argparse.ArgumentTypeError("Use a JSON object with finite values.") from error
+        raise argparse.ArgumentTypeError(
+            "Use a JSON object with finite values."
+        ) from error
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:4181")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("health", "tasks", "actions", "commands"):
         commands.add_parser(name)
-    for name in ("state", "events", "output", "run", "command", "cancel", "cancel-command"):
+    for name in (
+        "state",
+        "events",
+        "output",
+        "run",
+        "command",
+        "cancel",
+        "cancel-command",
+    ):
         sub = commands.add_parser(name)
         sub.add_argument("task_set")
         sub.add_argument("task")
@@ -86,7 +106,11 @@ def main(argv=None):
                     path + "/cancellations",
                     {
                         "request_id": args.request_id or str(uuid.uuid4()),
-                        ("action_id" if args.command == "cancel" else "command_id"): (args.action_id if args.command == "cancel" else args.command_id),
+                        ("action_id" if args.command == "cancel" else "command_id"): (
+                            args.action_id
+                            if args.command == "cancel"
+                            else args.command_id
+                        ),
                     },
                 )
             else:
@@ -97,28 +121,51 @@ def main(argv=None):
                     parameters["prompt"] = args.prompt
                 request_id = args.request_id or str(uuid.uuid4())
                 if args.command == "run":
-                    body = {"request_id": request_id, "command": "one-action", "parameters": {
-                        "action": args.action, "action_parameters": parameters,
-                    }}
+                    body = {
+                        "request_id": request_id,
+                        "command": "one-action",
+                        "parameters": {
+                            "action": args.action,
+                            "action_parameters": parameters,
+                        },
+                    }
                 else:
-                    body = {"request_id": request_id, "command": args.command_name, "parameters": parameters}
+                    body = {
+                        "request_id": request_id,
+                        "command": args.command_name,
+                        "parameters": parameters,
+                    }
                 result = request(args.url, path + "/commands", body)
                 print(json.dumps(result, indent=2), flush=True)
                 if result.get("type") in ("completed", "command_completed"):
                     return 0 if result["outcome"] == "succeeded" else 1
                 if not args.wait:
                     return 0
-                pending = set() if result.get("command_id") else {result["action_id"]}
+                pending = (
+                    set()
+                    if result.get("command_id")
+                    else {text_value(result["action_id"])}
+                )
                 while True:
-                    state = request(args.url, path + "/state")
+                    state = cast(State, request(args.url, path + "/state"))
                     if result.get("command_id"):
-                        command = state["commands"][result["command_id"]]
+                        command = state["commands"][text_value(result["command_id"])]
                         if command["status"] == "completed":
-                            print(json.dumps({
-                                "task_set": args.task_set, "task": args.task,
-                                "command_id": command["command_id"], "type": "command_completed",
-                                **{key: command[key] for key in ("outcome", "result", "error", "failed_action_id")},
-                            }, indent=2))
+                            print(
+                                json.dumps(
+                                    {
+                                        "task_set": args.task_set,
+                                        "task": args.task,
+                                        "command_id": command["command_id"],
+                                        "type": "command_completed",
+                                        "outcome": command["outcome"],
+                                        "result": command["result"],
+                                        "error": command["error"],
+                                        "failed_action_id": command["failed_action_id"],
+                                    },
+                                    indent=2,
+                                )
+                            )
                             return 0 if command["outcome"] == "succeeded" else 1
                         time.sleep(0.5)
                         continue
@@ -126,18 +173,28 @@ def main(argv=None):
                     failures = [
                         action
                         for action in actions
-                        if action["status"] == "completed" and action["outcome"] != "succeeded"
+                        if action["status"] == "completed"
+                        and action["outcome"] != "succeeded"
                     ]
-                    if failures or all(action["status"] == "completed" for action in actions):
+                    if failures or all(
+                        action["status"] == "completed" for action in actions
+                    ):
                         for action in actions:
                             if action["status"] == "completed":
-                                print(json.dumps({
-                                    "task_set": args.task_set,
-                                    "task": args.task,
-                                    "action_id": action["action_id"],
-                                    "type": "completed",
-                                    **{key: action[key] for key in ("outcome", "result", "error")},
-                                }, indent=2))
+                                print(
+                                    json.dumps(
+                                        {
+                                            "task_set": args.task_set,
+                                            "task": args.task,
+                                            "action_id": action["action_id"],
+                                            "type": "completed",
+                                            "outcome": action["outcome"],
+                                            "result": action["result"],
+                                            "error": action["error"],
+                                        },
+                                        indent=2,
+                                    )
+                                )
                         return 1 if failures else 0
                     time.sleep(0.5)
         print(json.dumps(result, indent=2))

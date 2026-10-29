@@ -1,18 +1,28 @@
 """Redesign action handler."""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import Callable, Self
 
+from engine.type_defs import ActionConfig, ExecutionCommand, JsonObject
+
+from ..storage import sync_directory
 from .base import AgentActionHandler
 from .common import design_sources, digest, read_document
-from ..storage import sync_directory
 
 
 class action_redesign(AgentActionHandler):
     name = "redesign"
     parameters = frozenset({"agent", "prompt"})
 
-    def run(self, config, execute, output_path):
+    def run(
+        self: Self,
+        config: ActionConfig,
+        execute: Callable[[ExecutionCommand], int],
+        output_path: Path,
+    ) -> JsonObject:
         task_path, job_path = Path(config["task_path"]), Path(config["job_path"])
         sources = design_sources(task_path)
         design_path = task_path / "design.md"

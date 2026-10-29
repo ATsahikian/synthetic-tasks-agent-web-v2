@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import json
 import logging
@@ -5,17 +7,18 @@ import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Self, Sequence, cast
 from urllib.parse import parse_qs, unquote, urlsplit
-
 
 if __package__ in (None, ""):
     # Support both "python3 server.py" and "python3 -m engine".
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+
 from engine.actions import reject_constant
 from engine.core import DEFAULT_TASKS_ROOT, Engine
 from engine.errors import EngineError
-
+from engine.type_defs import JsonValue
 
 LOGGER = logging.getLogger(__name__)
 MAX_BODY_BYTES = 1024 * 1024
@@ -26,24 +29,27 @@ class EngineHTTPServer(ThreadingHTTPServer):
     block_on_close = True
     request_queue_size = 64
 
-    def __init__(self, address, engine):
+    def __init__(self: Self, address: tuple[str, int], engine: Engine) -> None:
         self.engine = engine
         super().__init__(address, Handler)
 
-    def get_request(self):
+    def get_request(self: Self) -> tuple[socket.socket, tuple[str, int]]:
         connection, address = super().get_request()
         connection.settimeout(10)
         return connection, address
 
 
 class Handler(BaseHTTPRequestHandler):
+    server: EngineHTTPServer
     server_version = "TaskEventEngine/0.1"
 
-    def log_message(self, format, *args):
+    def log_message(self: Self, format: str, *args: object) -> None:
         LOGGER.info("%s %s", self.address_string(), format % args)
 
-    def _json_response(self, status, value):
-        encoded = (json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    def _json_response(self: Self, status: int, value: object) -> None:
+        encoded = (
+            json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n"
+        ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
@@ -53,7 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
         self.close_connection = True
 
-    def _read_body(self):
+    def _read_body(self: Self) -> JsonValue:
         if self.headers.get("Transfer-Encoding"):
             raise EngineError("Transfer-Encoding is unsupported.")
         if (
@@ -61,11 +67,11 @@ class Handler(BaseHTTPRequestHandler):
             != "application/json"
         ):
             raise EngineError("Content-Type must be application/json.", status=415)
-        length = self.headers.get("Content-Length")
-        if length is None:
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
             raise EngineError("Content-Length is required.", status=411)
         try:
-            length = int(length)
+            length = int(raw_length)
         except ValueError as error:
             raise EngineError("Invalid Content-Length.") from error
         if length <= 0:
@@ -76,17 +82,26 @@ class Handler(BaseHTTPRequestHandler):
         if len(data) != length:
             raise EngineError("Incomplete request body.")
         try:
-            return json.loads(data.decode("utf-8"), parse_constant=reject_constant)
+            return cast(
+                JsonValue,
+                json.loads(data.decode("utf-8"), parse_constant=reject_constant),
+            )
         except (UnicodeError, ValueError, RecursionError) as error:
-            raise EngineError("Body must be valid UTF-8 JSON with finite numbers.") from error
+            raise EngineError(
+                "Body must be valid UTF-8 JSON with finite numbers."
+            ) from error
 
-    def _route(self):
+    def _route(self: Self) -> tuple[int, object]:
         parsed = urlsplit(self.path)
         parts = [unquote(part) for part in parsed.path.strip("/").split("/")]
         query = parse_qs(parsed.query, keep_blank_values=True)
         engine = self.server.engine
         if self.command == "GET":
-            is_events = len(parts) == 5 and parts[:2] == ["api", "tasks"] and parts[4] == "events"
+            is_events = (
+                len(parts) == 5
+                and parts[:2] == ["api", "tasks"]
+                and parts[4] == "events"
+            )
             is_output = (
                 len(parts) == 7
                 and parts[:2] == ["api", "tasks"]
@@ -109,7 +124,9 @@ class Handler(BaseHTTPRequestHandler):
                 after = query.get("after", ["0"])[0]
                 if not after.isascii() or not after.isdecimal():
                     raise EngineError("after must be a nonnegative byte offset.")
-                return 200, engine.output(parts[2], parts[3], parts[5], after=int(after))
+                return 200, engine.output(
+                    parts[2], parts[3], parts[5], after=int(after)
+                )
             if len(parts) == 5 and parts[:2] == ["api", "tasks"]:
                 task_set, task = parts[2:4]
                 if parts[4] == "state":
@@ -119,12 +136,14 @@ class Handler(BaseHTTPRequestHandler):
                         raise EngineError("Expected at most one after query parameter.")
                     after = query.get("after", ["0"])[0]
                     if not after.isascii() or not after.isdecimal():
-                        raise EngineError("after must be a nonnegative integer sequence.")
+                        raise EngineError(
+                            "after must be a nonnegative integer sequence."
+                        )
                     try:
-                        after = int(after)
+                        after_sequence = int(after)
                     except ValueError as error:
                         raise EngineError("Invalid after sequence.") from error
-                    return 200, engine.events(task_set, task, after=after)
+                    return 200, engine.events(task_set, task, after=after_sequence)
                 if parts[4] in ("commands", "cancellations"):
                     raise EngineError("Use POST for this endpoint.", status=405)
         elif self.command == "POST":
@@ -142,13 +161,18 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 if parts[4] == "state":
                     raise EngineError("Use GET for state.", status=405)
-            if parts in (["health"], ["api", "tasks"], ["api", "actions"], ["api", "commands"]):
+            if parts in (
+                ["health"],
+                ["api", "tasks"],
+                ["api", "actions"],
+                ["api", "commands"],
+            ):
                 raise EngineError("Use GET for this endpoint.", status=405)
         else:
             raise EngineError("Method is unsupported.", status=405)
         raise EngineError("Endpoint not found.", status=404, code="endpoint_not_found")
 
-    def _handle(self):
+    def _handle(self: Self) -> None:
         try:
             try:
                 status, value = self._route()
@@ -156,14 +180,26 @@ class Handler(BaseHTTPRequestHandler):
                 status = error.status
                 value = {"error": {"code": error.code, "message": str(error)}}
             except (socket.timeout, TimeoutError):
-                status, value = 408, {
-                    "error": {"code": "request_timeout", "message": "Request timed out."}
-                }
+                status, value = (
+                    408,
+                    {
+                        "error": {
+                            "code": "request_timeout",
+                            "message": "Request timed out.",
+                        }
+                    },
+                )
             except Exception:
                 LOGGER.exception("Unexpected API error")
-                status, value = 500, {
-                    "error": {"code": "internal_error", "message": "Internal server error."}
-                }
+                status, value = (
+                    500,
+                    {
+                        "error": {
+                            "code": "internal_error",
+                            "message": "Internal server error.",
+                        }
+                    },
+                )
             self._json_response(status, value)
         except (BrokenPipeError, ConnectionResetError, socket.timeout):
             # A lost response is safe to retry with the original request ID.
@@ -176,13 +212,15 @@ class Handler(BaseHTTPRequestHandler):
     do_DELETE = _handle
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the v2 task event engine.")
     parser.add_argument("--tasks-root", type=Path, default=DEFAULT_TASKS_ROOT)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4181)
     arguments = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     engine = None
     server = None
     try:

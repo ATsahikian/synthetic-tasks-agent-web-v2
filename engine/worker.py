@@ -1,23 +1,35 @@
 """Detached executor: durable input/output/result, one supervised process group."""
 
+from __future__ import annotations
+
 import fcntl
-import re
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import BinaryIO, Self, cast
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+
 from engine.actions import canonical_json, run_action
 from engine.storage import atomic_json_write
+from engine.type_defs import (
+    ActionConfig,
+    Completion,
+    ExecutionCommand,
+    JsonObject,
+    Outcome,
+    PathLike,
+)
 
 
-def process_identity(pid):
+def process_identity(pid: object) -> str | None:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
         return None if stat[0] == "Z" else stat[19]
@@ -25,17 +37,20 @@ def process_identity(pid):
         return None
 
 
-def same_process(pid, identity):
+def same_process(pid: object, identity: object) -> bool:
     return (
-        type(pid) is int and pid > 0 and identity is not None and process_identity(pid) == identity
+        type(pid) is int
+        and pid > 0
+        and identity is not None
+        and process_identity(pid) == identity
     )
 
 
-def group_exists(pgid):
+def group_exists(pgid: int) -> bool:
     return bool(group_members(pgid))
 
 
-def group_members(pgid):
+def group_members(pgid: int) -> list[int]:
     members = []
     for entry in os.scandir("/proc"):
         if not entry.name.isdecimal():
@@ -49,7 +64,7 @@ def group_members(pgid):
     return members
 
 
-def owned_group(pgid, action_id):
+def owned_group(pgid: object, action_id: str) -> bool:
     if type(pgid) is not int or pgid <= 0:
         return False
     tag = f"SYNTHETIC_JOB_ID={action_id}".encode()
@@ -62,7 +77,7 @@ def owned_group(pgid, action_id):
     return False
 
 
-def tagged_groups(action_id):
+def tagged_groups(action_id: str) -> set[int]:
     groups = set()
     tag = f"SYNTHETIC_JOB_ID={action_id}".encode()
     for entry in os.scandir("/proc"):
@@ -79,7 +94,7 @@ def tagged_groups(action_id):
     return groups
 
 
-def stop_group(pgid, grace):
+def stop_group(pgid: int, grace: float) -> None:
     if not pgid:
         return
     try:
@@ -96,9 +111,9 @@ def stop_group(pgid, grace):
             pass
 
 
-def render(value, context):
+def render(value: str, context: JsonObject) -> str:
     # Only known placeholders are expanded; inserted text is never interpreted.
-    def replace(match):
+    def replace(match: re.Match[str]) -> str:
         key = match[1]
         if key not in context:
             raise RuntimeError(f"Unknown runner placeholder {{{key}}}.")
@@ -109,11 +124,18 @@ def render(value, context):
 
 
 class Executor:
-    def __init__(self, config, job_path, output, *, cancellable=True):
+    def __init__(
+        self: Self,
+        config: ActionConfig,
+        job_path: Path,
+        output: BinaryIO,
+        *,
+        cancellable: bool = True,
+    ) -> None:
         self.config, self.job_path, self.output = config, job_path, output
         self.cancellable = cancellable
-        self.outcome = None
-        self.context = {
+        self.outcome: Outcome | None = None
+        self.context: JsonObject = {
             "task": config["action"]["task"],
             "task_set": config["action"]["task_set"],
             "task_path": config["task_path"],
@@ -122,21 +144,26 @@ class Executor:
             "action_id": config["action"]["action_id"],
         }
         self.context.update(
-            {f"parameters.{key}": value for key, value in config["action"]["parameters"].items()}
+            {
+                f"parameters.{key}": value
+                for key, value in config["action"]["parameters"].items()
+            }
         )
         self.environment = os.environ.copy()
         self.environment.update(
             {
-                "SYNTHETIC_TASK": self.context["task"],
-                "SYNTHETIC_TASK_SET": self.context["task_set"],
-                "SYNTHETIC_TASK_PATH": self.context["task_path"],
-                "SYNTHETIC_JOB_ID": self.context["action_id"],
-                "SYNTHETIC_WORKSPACE_ROOT": str(Path(config["task_path"]).parent.parent),
+                "SYNTHETIC_TASK": config["action"]["task"],
+                "SYNTHETIC_TASK_SET": config["action"]["task_set"],
+                "SYNTHETIC_TASK_PATH": config["task_path"],
+                "SYNTHETIC_JOB_ID": config["action"]["action_id"],
+                "SYNTHETIC_WORKSPACE_ROOT": str(
+                    Path(config["task_path"]).parent.parent
+                ),
                 "SYNTHETIC_AGENT": config["execution"].get("agent", "script"),
             }
         )
 
-    def execute(self, command):
+    def execute(self: Self, command: ExecutionCommand) -> int:
         if self.cancellable and (self.job_path / "cancel.json").exists():
             self.outcome = "cancelled"
             raise RuntimeError("Action cancelled.")
@@ -165,12 +192,16 @@ class Executor:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        record = {"pid": child.pid, "identity": process_identity(child.pid), "pgid": child.pid}
+        record = {
+            "pid": child.pid,
+            "identity": process_identity(child.pid),
+            "pgid": child.pid,
+        }
         atomic_json_write(self.job_path / "process.json", record)
         timeout = command.get("timeout_ms", 3600000)
         deadline = time.monotonic() + timeout / 1000 if timeout is not None else None
-        grace = command.get("termination_grace_ms", 10000)
-        grace = 10 if grace is None else grace / 1000
+        grace_ms = command.get("termination_grace_ms", 10000)
+        grace = 10.0 if grace_ms is None else grace_ms / 1000
         try:
             while child.poll() is None:
                 if self.cancellable and (self.job_path / "cancel.json").exists():
@@ -197,7 +228,7 @@ class Executor:
         return code
 
 
-def main(config_path):
+def main(config_path: PathLike) -> int:
     config_path = Path(config_path)
     job_path = config_path.parent
     # A worker owns its durable directory. Repeated launches do not execute twice.
@@ -208,7 +239,7 @@ def main(config_path):
             return 0
         if (job_path / "result.json").exists():
             return 0
-        config = json.loads(config_path.read_text("utf-8"))
+        config = cast(ActionConfig, json.loads(config_path.read_text("utf-8")))
         atomic_json_write(
             job_path / "worker.json",
             {"pid": os.getpid(), "identity": process_identity(os.getpid())},
@@ -220,7 +251,11 @@ def main(config_path):
                     executor.outcome = "cancelled"
                     raise RuntimeError("Action cancelled.")
                 result = run_action(config, executor.execute, job_path / "output.log")
-                completion = {"outcome": "succeeded", "result": result, "error": None}
+                completion: Completion = {
+                    "outcome": "succeeded",
+                    "result": result,
+                    "error": None,
+                }
             except BaseException as error:
                 output.write(f"[engine] {error}\n".encode("utf-8", errors="replace"))
                 completion = {

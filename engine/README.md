@@ -331,10 +331,10 @@ relaunched. Historical completed-only events remain replayable.
 
 ### Git worker
 
-The implementation lives in `git-worker/`: `worker.py` owns the queue,
+The implementation lives in `git_worker/`: `worker.py` owns the queue,
 `transactions.py` handles scoped commits, and `export.py` handles publishing.
-The folder's `__init__.py` exposes the package API. The engine initializer registers
-the folder as `engine.git_worker` for Python imports.
+The folder's `__init__.py` exposes the package API through standard
+`engine.git_worker` imports.
 
 The engine stores the global queue in `<tasks-root>/.review/git-queue.json` and
 holds `<tasks-root>/.review/git-worker.lock` while running. Queue entries identify
@@ -385,12 +385,15 @@ Stored histories remain readable when a task loses its discovery markers. Existi
 worker results are still reconciled, and remaining queued command work is cancelled
 when the task is no longer discovered.
 
-## Tests
+## Development checks
 
-From the repository root:
+Install `requirements-dev.txt` in a Python 3.12 virtual environment as described
+in the [project README](../README.md). From the repository root:
 
 ```bash
-python3 -m unittest discover -s engine/tests -v
+python -m mypy
+python -m tools.check_annotations
+python -m unittest discover -s engine/tests -v
 ```
 
 Tests cover current command calls, parameter bindings, the worker action lifecycle,

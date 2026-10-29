@@ -1,37 +1,53 @@
 """Worker action handlers and shared agent execution support."""
 
+from __future__ import annotations
+
 import copy
-import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Callable, Self, cast
 
+from engine.type_defs import ActionConfig, ExecutionCommand, ExecutionSpec, JsonObject
+
+from ..errors import EngineError
 from .common import agent_command, validate_parameters
 from .definitions import canonical_json
-from ..errors import EngineError
 
 
 class ActionHandler(ABC):
     """Persist started, execute outside the engine lock, then persist completed."""
 
-    parameters = frozenset()
+    name: str
+    executor: str | None = None
+    parameters: frozenset[str] = frozenset()
     accepts_arbitrary_parameters = False
-    required_parameters = frozenset()
-    runner_fields = frozenset()
+    required_parameters: frozenset[str] = frozenset()
+    runner_fields: frozenset[str] = frozenset()
 
-    def configure_runner(self, runner, directory):
+    def configure_runner(self: Self, runner: object, directory: Path) -> ExecutionSpec:
         if not isinstance(runner, dict):
             raise EngineError("runner must be an object.")
         if set(runner) - self.runner_fields:
             raise EngineError(f"Unknown runner fields for {self.name}.")
+        return copy.deepcopy(cast(ExecutionSpec, runner))
+
+    def prepare(
+        self: Self, runner: ExecutionSpec, parameters: JsonObject
+    ) -> ExecutionSpec:
+        validate_parameters(
+            self.name, parameters, self.parameters, self.required_parameters
+        )
+        canonical_json(runner)
         return copy.deepcopy(runner)
 
-    def prepare(self, runner, parameters):
-        validate_parameters(self.name, parameters, self.parameters, self.required_parameters)
-        return json.loads(canonical_json(runner))
-
     @abstractmethod
-    def run(self, config, execute, output_path):
+    def run(
+        self: Self,
+        config: ActionConfig,
+        execute: Callable[[ExecutionCommand], int],
+        output_path: Path,
+    ) -> JsonObject:
         """Return the result, or raise an exception to report a failed completion."""
 
 
@@ -44,7 +60,9 @@ class GitActionHandler(ActionHandler):
 class AgentActionHandler(ActionHandler):
     needs_guide = True
 
-    def prepare(self, runner, parameters):
+    def prepare(
+        self: Self, runner: ExecutionSpec, parameters: JsonObject
+    ) -> ExecutionSpec:
         spec = super().prepare(runner, parameters)
         agent = parameters.get("agent", "codex")
         if not isinstance(agent, str) or agent not in {"codex", "claude", "muse"}:
@@ -52,13 +70,19 @@ class AgentActionHandler(ActionHandler):
         spec["agent"] = agent
         spec["agent_bin"] = os.environ.get(f"{agent.upper()}_BIN", agent)
         spec["templates_path"] = os.environ.get(
-            "CLAUDE_TEMPLATES_PATH", str(Path.home() / ".codex/plugins/cache/claude-templates")
+            "CLAUDE_TEMPLATES_PATH",
+            str(Path.home() / ".codex/plugins/cache/claude-templates"),
         )
         if self.needs_guide:
-            guide = Path(os.environ.get(
-                "CYBER_BENCH_GUIDE_PATH",
-                str(Path(spec["templates_path"]) / "team-aai/0.0.0/skills/cyber-bench-guide/SKILL.md"),
-            ))
+            guide = Path(
+                os.environ.get(
+                    "CYBER_BENCH_GUIDE_PATH",
+                    str(
+                        Path(spec["templates_path"])
+                        / "team-aai/0.0.0/skills/cyber-bench-guide/SKILL.md"
+                    ),
+                )
+            )
             try:
                 spec["guide"] = guide.read_text("utf-8")
             except OSError as error:
@@ -67,7 +91,7 @@ class AgentActionHandler(ActionHandler):
                 ) from error
         return spec
 
-    def context(self, config):
+    def context(self: Self, config: ActionConfig) -> str:
         task_path = Path(config["task_path"])
         context = (
             f"This invocation owns exactly one task: {task_path}. Task set: {task_path.parent}. "
@@ -83,9 +107,18 @@ class AgentActionHandler(ActionHandler):
             )
         return context
 
-    def execute_agent(self, config, execute, prompt):
+    def execute_agent(
+        self: Self,
+        config: ActionConfig,
+        execute: Callable[[ExecutionCommand], int],
+        prompt: str,
+    ) -> None:
         command = agent_command(config["execution"], Path(config["task_path"]), prompt)
-        command.update({"cwd": config["task_path"], "timeout_ms": 3600000, "literal": True})
+        command.update(
+            {"cwd": config["task_path"], "timeout_ms": 3600000, "literal": True}
+        )
         code = execute(command)
         if code != 0:
-            raise RuntimeError(f"{config['execution']['agent']} exited with status {code}.")
+            raise RuntimeError(
+                f"{config['execution']['agent']} exited with status {code}."
+            )
